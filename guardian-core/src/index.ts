@@ -5,6 +5,7 @@ import path from 'path';
 import net from 'net';
 import os from 'os';
 import { exec } from 'child_process';
+import { promisify } from 'util';
 import { 
   AgentRecord, 
   DiscoveredDevice, 
@@ -30,6 +31,8 @@ const app = express();
 const PORT = process.env.PORT || 4000;
 const STORAGE_FILE = path.join(process.cwd(), 'storage.json');
 const VALID_AGENT_TOKEN = 'GUARDIAN-SECRET-AGENT-KEY-v0.9';
+const execAsync = promisify(exec);
+const isWindows = process.platform === 'win32';
 
 app.use(cors());
 app.use(express.json());
@@ -210,38 +213,84 @@ function saveStorage() {
 
 loadStorage();
 
-// Trigger Windows Ping Sweep to force full subnet ARP discovery
-function triggerSubnetPingSweep(subnetPrefix: string): Promise<void> {
-  return new Promise((resolve) => {
-    // Fast PowerShell ICMP Ping Sweep across subnet range 1..254
-    const cmd = `powershell -Command "1..254 | ForEach-Object { Test-Connection -ComputerName '${subnetPrefix}.$_' -Count 1 -TimeoutMillis 80 -Quiet } | Out-Null"`;
-    exec(cmd, { timeout: 8000 }, () => {
-      resolve();
-    });
-  });
+function readField<T = any>(source: any, camel: string, snake: string, fallback?: T): T {
+  return (source?.[camel] ?? source?.[snake] ?? fallback) as T;
 }
 
-// Real Windows ARP Cache Table Probe
-function getRealArpDevices(targetSubnet: string): Promise<Array<{ ip: string; mac: string }>> {
-  return new Promise((resolve) => {
-    exec('arp -a', (err, stdout) => {
-      if (err || !stdout) return resolve([]);
-      const lines = stdout.split('\n');
-      const found: Array<{ ip: string; mac: string }> = [];
+function normalizeInventory(raw: any): SystemInventory {
+  return {
+    hostname: readField(raw, 'hostname', 'hostname', 'UNKNOWN-HOST'),
+    osName: readField(raw, 'osName', 'os_name', 'Unknown OS'),
+    osVersion: readField(raw, 'osVersion', 'os_version', 'Unknown'),
+    architecture: readField(raw, 'architecture', 'architecture', process.arch),
+    cpuModel: readField(raw, 'cpuModel', 'cpu_model', 'Unknown CPU'),
+    totalMemoryMb: Number(readField(raw, 'totalMemoryMb', 'total_memory_mb', 0)),
+    ipAddress: readField(raw, 'ipAddress', 'ip_address', ''),
+    macAddress: readField(raw, 'macAddress', 'mac_address', ''),
+  };
+}
 
-      for (const line of lines) {
-        const parts = line.trim().split(/\s+/);
-        if (parts.length >= 2) {
-          const ip = parts[0];
-          const mac = parts[1];
-          if (ip.startsWith(targetSubnet) && mac.includes('-') && !mac.startsWith('ff-ff-ff')) {
-            found.push({ ip, mac: mac.toUpperCase() });
-          }
-        }
-      }
-      resolve(found);
-    });
+function normalizeTelemetry(raw: any): TelemetryPayload {
+  return {
+    agentId: readField(raw, 'agentId', 'agent_id', ''),
+    timestamp: readField(raw, 'timestamp', 'timestamp', new Date().toISOString()),
+    cpuUsagePct: Number(readField(raw, 'cpuUsagePct', 'cpu_usage_pct', 0)),
+    memoryUsagePct: Number(readField(raw, 'memoryUsagePct', 'memory_usage_pct', 0)),
+    diskUsagePct: Number(readField(raw, 'diskUsagePct', 'disk_usage_pct', 0)),
+    activeProcessesCount: Number(readField(raw, 'activeProcessesCount', 'active_processes_count', 0)),
+    eventsCount: Number(readField(raw, 'eventsCount', 'events_count', 0)),
+    topProcesses: readField(raw, 'topProcesses', 'top_processes', []),
+    networkConnections: readField(raw, 'networkConnections', 'network_connections', []),
+    fileEvents: readField(raw, 'fileEvents', 'file_events', []),
+  };
+}
+
+function runCommand(command: string, timeout = 10000): Promise<string> {
+  return execAsync(command, { timeout, windowsHide: true })
+    .then(({ stdout }) => stdout)
+    .catch(() => '');
+}
+
+function normalizeMac(mac: string): string {
+  return mac.replace(/-/g, ':').toUpperCase();
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+async function triggerSubnetPingSweep(subnetPrefix: string): Promise<void> {
+  const pingCommands = Array.from({ length: 254 }, (_, idx) => {
+    const ip = `${subnetPrefix}.${idx + 1}`;
+    const cmd = isWindows ? `ping -n 1 -w 250 ${ip}` : `ping -c 1 -W 1 ${ip}`;
+    return runCommand(cmd, 1500);
   });
+
+  for (let i = 0; i < pingCommands.length; i += 64) {
+    await Promise.all(pingCommands.slice(i, i + 64));
+  }
+}
+
+async function getRealArpDevices(targetSubnet: string): Promise<Array<{ ip: string; mac: string }>> {
+  const outputs = await Promise.all([
+    runCommand('arp -a'),
+    isWindows ? Promise.resolve('') : runCommand('ip neigh show'),
+  ]);
+  const found = new Map<string, string>();
+  const macRegex = /(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}/i;
+  const ipRegex = new RegExp(`\\b${escapeRegex(targetSubnet)}\\.\\d{1,3}\\b`);
+
+  for (const output of outputs) {
+    for (const line of output.split('\n')) {
+      const ip = line.match(ipRegex)?.[0];
+      const mac = line.match(macRegex)?.[0];
+      if (ip && mac && !/^ff[:-]ff[:-]ff[:-]ff[:-]ff[:-]ff$/i.test(mac)) {
+        found.set(ip, normalizeMac(mac));
+      }
+    }
+  }
+
+  return Array.from(found, ([ip, mac]) => ({ ip, mac }));
 }
 
 // Real Socket Connection Probe
@@ -277,11 +326,16 @@ async function performDeepNetworkDiscovery(targetSubnet: string): Promise<Discov
   const probePorts = [21, 22, 23, 80, 135, 137, 139, 443, 445, 548, 631, 1900, 3306, 3389, 5353, 8080];
 
   const targetIPs = new Set<string>();
-  targetIPs.add(`${targetSubnet}.1`);
-  targetIPs.add(`${targetSubnet}.140`);
-
   for (const n of arpNeighbors) {
     targetIPs.add(n.ip);
+  }
+  for (const agent of agents.values()) {
+    if (agent.inventory.ipAddress?.startsWith(`${targetSubnet}.`)) {
+      targetIPs.add(agent.inventory.ipAddress);
+    }
+  }
+  if (targetIPs.size === 0) {
+    targetIPs.add(`${targetSubnet}.1`);
   }
 
   const probePromises = Array.from(targetIPs).map(async (targetIp) => {
@@ -511,7 +565,7 @@ app.get('/api/v1/events', (_req: Request, res: Response) => {
 
 // POST /api/v1/agents/register (Protected by verifyAgentToken & DEDUPLICATED BY HOSTNAME)
 app.post('/api/v1/agents/register', verifyAgentToken, (req: Request, res: Response) => {
-  const inventory: SystemInventory = req.body;
+  const inventory: SystemInventory = normalizeInventory(req.body);
   if (!inventory.hostname) {
     return res.status(400).json({ error: 'Hostname is required' });
   }
@@ -547,12 +601,12 @@ app.post('/api/v1/agents/register', verifyAgentToken, (req: Request, res: Respon
   saveAgentToDb(updatedAgent);
   broadcastSSE('agent_registered', updatedAgent);
 
-  res.status(201).json({ agentId, status: 'registered' });
+  res.status(201).json({ agentId, status: 'registered', expectedPayloadCase: 'camelCase_or_snake_case' });
 });
 
 // POST /api/v1/agents/heartbeat (Protected by verifyAgentToken)
 app.post('/api/v1/agents/heartbeat', verifyAgentToken, (req: Request, res: Response) => {
-  const payload: TelemetryPayload = req.body;
+  const payload: TelemetryPayload = normalizeTelemetry(req.body);
   
   let agent = agents.get(payload.agentId);
   if (!agent) {

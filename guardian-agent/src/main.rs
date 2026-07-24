@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
+use std::net::UdpSocket;
 use std::time::Duration;
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
@@ -8,6 +9,7 @@ use sha2::{Digest, Sha256};
 use sysinfo::System;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SystemInventory {
     pub hostname: String,
     pub os_name: String,
@@ -20,6 +22,7 @@ pub struct SystemInventory {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProcessTelemetry {
     pub pid: u32,
     pub parent_pid: Option<u32>,
@@ -31,6 +34,7 @@ pub struct ProcessTelemetry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct NetworkTelemetry {
     pub pid: u32,
     pub process_name: String,
@@ -43,6 +47,7 @@ pub struct NetworkTelemetry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FileTelemetry {
     pub file_path: String,
     pub action: String, // CREATED, MODIFIED, DELETED, RENAMED
@@ -51,6 +56,7 @@ pub struct FileTelemetry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TelemetryPayload {
     pub agent_id: String,
     pub timestamp: String,
@@ -60,9 +66,18 @@ pub struct TelemetryPayload {
     pub active_processes_count: usize,
     pub events_count: usize,
     pub top_processes: Vec<ProcessTelemetry>,
-    #[serde(rename = "networkConnections")]
     pub network_connections: Vec<NetworkTelemetry>,
     pub file_events: Vec<FileTelemetry>,
+}
+
+fn get_primary_ip_address() -> String {
+    UdpSocket::bind("0.0.0.0:0")
+        .and_then(|socket| {
+            socket.connect("8.8.8.8:80")?;
+            socket.local_addr()
+        })
+        .map(|addr| addr.ip().to_string())
+        .unwrap_or_else(|_| "127.0.0.1".to_string())
 }
 
 fn compute_sha256(path_str: &str) -> String {
@@ -108,7 +123,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         architecture: "x64".to_string(),
         cpu_model,
         total_memory_mb: sys.total_memory() / (1024 * 1024),
-        ip_address: "127.0.0.1".to_string(),
+        ip_address: get_primary_ip_address(),
         mac_address: "00:00:00:00:00:00".to_string(),
     };
 
