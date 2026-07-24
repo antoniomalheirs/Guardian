@@ -14,19 +14,20 @@ const util_1 = require("util");
 const db_js_1 = require("./db.js");
 const app = (0, express_1.default)();
 const PORT = process.env.PORT || 4000;
-const STORAGE_FILE = path_1.default.join(process.cwd(), 'storage.json');
 const VALID_AGENT_TOKEN = 'GUARDIAN-SECRET-AGENT-KEY-v0.9';
 const execAsync = (0, util_1.promisify)(child_process_1.exec);
 const isWindows = process.platform === 'win32';
 app.use((0, cors_1.default)());
 app.use(express_1.default.json());
-// State Holders
+// State Holders (SQL Backed)
 let agents = new Map();
 let eventsHistory = [];
 let alertsHistory = [];
 let quarantineHistory = [];
 let discoveredDevices = [];
 let sseClients = [];
+// Deep Detection State Trackers
+const agentTelemetryHistory = new Map();
 let activeRules = [
     {
         ruleId: 'RULE-WIN-001',
@@ -49,7 +50,7 @@ let activeRules = [
         name: 'Suspicious Remote Port Outbound Socket',
         category: 'NETWORK',
         severity: 'HIGH',
-        description: 'Detects outbound connections to non-standard remote ports (ex: 4444, 6667) [MITRE T1071]',
+        description: 'Detects outbound connections to non-standard remote ports (ex: 4444, 6667, 1337) [MITRE T1071]',
         enabled: true,
     },
     {
@@ -108,6 +109,125 @@ let activeRules = [
         description: 'Detects system binaries (ex: svchost.exe) executing outside System32 directory [MITRE T1036]',
         enabled: true,
     },
+    {
+        ruleId: 'RULE-AND-011',
+        name: 'Android Untrusted APK Payload / Shell Dropper',
+        category: 'FILE',
+        severity: 'HIGH',
+        description: 'Detects untrusted binary scripts or APK payloads dropped in Android storage [MITRE T1476]',
+        enabled: true,
+    },
+    {
+        ruleId: 'RULE-MASQ-012',
+        name: 'System Binary Path Masquerading',
+        category: 'PROCESS',
+        severity: 'CRITICAL',
+        description: 'Detects svchost/csrss/lsass/services.exe running from outside System32 [MITRE T1036.005]',
+        enabled: true,
+    },
+    {
+        ruleId: 'RULE-CHAIN-013',
+        name: 'Suspicious Parent-Child Process Chain',
+        category: 'PROCESS',
+        severity: 'HIGH',
+        description: 'Detects Office apps spawning cmd/powershell or svchost with wrong parent [MITRE T1059]',
+        enabled: true,
+    },
+    {
+        ruleId: 'RULE-LOL-014',
+        name: 'Living-off-the-Land Binary Execution',
+        category: 'PROCESS',
+        severity: 'HIGH',
+        description: 'Detects certutil/mshta/regsvr32/rundll32/bitsadmin/wscript/cscript execution [MITRE T1218]',
+        enabled: true,
+    },
+    {
+        ruleId: 'RULE-BEACON-015',
+        name: 'C2 Beaconing Regular Interval Detection',
+        category: 'NETWORK',
+        severity: 'CRITICAL',
+        description: 'Detects regular-interval outbound connections to same IP:port across heartbeats [MITRE T1071.001]',
+        enabled: true,
+    },
+    {
+        ruleId: 'RULE-EXFIL-016',
+        name: 'Data Exfiltration Connection Volume Spike',
+        category: 'NETWORK',
+        severity: 'HIGH',
+        description: 'Detects 3x+ spike in outbound connections vs previous heartbeat [MITRE T1041]',
+        enabled: true,
+    },
+    {
+        ruleId: 'RULE-MINER-017',
+        name: 'Cryptominer High CPU Anomaly',
+        category: 'BEHAVIOR',
+        severity: 'HIGH',
+        description: 'Detects sustained high CPU from non-system processes (potential cryptominer) [MITRE T1496]',
+        enabled: true,
+    },
+    {
+        ruleId: 'RULE-LATERAL-018',
+        name: 'Lateral Movement Outbound Connection',
+        category: 'NETWORK',
+        severity: 'HIGH',
+        description: 'Detects outbound SMB/RDP/WinRM/SSH from non-admin processes [MITRE T1021]',
+        enabled: true,
+    },
+    {
+        ruleId: 'RULE-FINDING-019',
+        name: 'Agent Deep Security Finding Escalation',
+        category: 'BEHAVIOR',
+        severity: 'HIGH',
+        description: 'Escalates HIGH/CRITICAL security findings reported by endpoint agents',
+        enabled: true,
+    },
+    {
+        ruleId: 'RULE-YARA-020',
+        name: 'YARA Signature Match Detection',
+        category: 'FILE',
+        severity: 'CRITICAL',
+        description: 'Triggers when a file matches a known YARA malware signature (Mimikatz, Cobalt Strike, Webshell, Ransomware)',
+        enabled: true,
+    },
+];
+// Built-in YARA Rules Database
+const builtInYaraRules = [
+    {
+        ruleId: 'YARA-MIMIKATZ-01',
+        name: 'Mimikatz Credential Harvester Signature',
+        threatType: 'MIMIKATZ',
+        severity: 'CRITICAL',
+        strings: ['sekurlsa::logonpasswords', 'lsadump::sam', 'privilege::debug', 'crypto::certificates', 'dpapi::chrome'],
+        description: 'Detects Mimikatz memory/sam dumping commands and strings [MITRE T1003]',
+        mitreId: 'T1003'
+    },
+    {
+        ruleId: 'YARA-COBALT-02',
+        name: 'Cobalt Strike Beacon Signature',
+        threatType: 'COBALT_STRIKE',
+        severity: 'CRITICAL',
+        strings: ['ReflectiveLoader', '%s as %s\\%s: %d', 'beacon.dll', 'postex_x64.dll', 'postex_x86.dll'],
+        description: 'Detects Cobalt Strike beacon reflective DLL injection indicators [MITRE T1055]',
+        mitreId: 'T1055'
+    },
+    {
+        ruleId: 'YARA-WEBSHELL-03',
+        name: 'WebShell Script Injection Signature',
+        threatType: 'WEBSHELL',
+        severity: 'HIGH',
+        strings: ['c99shell', 'r57shell', 'eval(base64_decode(', 'system($_GET[', 'exec($_POST['],
+        description: 'Detects PHP/ASP webshell execution and backdoor payloads [MITRE T1505.003]',
+        mitreId: 'T1505.003'
+    },
+    {
+        ruleId: 'YARA-RANSOM-04',
+        name: 'Ransomware Note / Key Signature',
+        threatType: 'RANSOMWARE',
+        severity: 'CRITICAL',
+        strings: ['YOUR_FILES_ARE_ENCRYPTED', 'DECRYPT_INSTRUCTIONS', 'LockBit 3.0', 'WanaDecryptor', 'ContiLocker'],
+        description: 'Detects ransomware ransom note text and encryption signatures [MITRE T1486]',
+        mitreId: 'T1486'
+    }
 ];
 // Helper to Auto-Detect Real Subnets from Local System Adapters
 function getLocalSubnets() {
@@ -128,11 +248,19 @@ function getLocalSubnets() {
         }
     }
     const sorted = Array.from(subnets).sort((a, b) => {
-        if (a.startsWith('192.168.50'))
+        const aIs50 = a === '192.168.50';
+        const bIs50 = b === '192.168.50';
+        if (aIs50 && !bIs50)
             return -1;
-        if (a.startsWith('192.168'))
+        if (!aIs50 && bIs50)
+            return 1;
+        const aIs192 = a.startsWith('192.168');
+        const bIs192 = b.startsWith('192.168');
+        if (aIs192 && !bIs192)
             return -1;
-        return 1;
+        if (!aIs192 && bIs192)
+            return 1;
+        return a.localeCompare(b);
     });
     return sorted.length > 0 ? sorted : ['192.168.50'];
 }
@@ -150,51 +278,6 @@ function verifyAgentToken(req, res, next) {
     }
     next();
 }
-// Load persisted state from disk if exists
-function loadStorage() {
-    try {
-        if (fs_1.default.existsSync(STORAGE_FILE)) {
-            const raw = fs_1.default.readFileSync(STORAGE_FILE, 'utf-8');
-            const data = JSON.parse(raw);
-            if (data.agents) {
-                agents = new Map(Object.entries(data.agents));
-            }
-            if (data.eventsHistory)
-                eventsHistory = data.eventsHistory;
-            if (data.alertsHistory)
-                alertsHistory = data.alertsHistory;
-            if (data.quarantineHistory)
-                quarantineHistory = data.quarantineHistory;
-            if (data.discoveredDevices)
-                discoveredDevices = data.discoveredDevices;
-            if (data.activeRules && data.activeRules.length >= 10)
-                activeRules = data.activeRules;
-            console.log(`💾 Local storage file loaded from ${STORAGE_FILE}`);
-        }
-    }
-    catch (err) {
-        console.error('Failed to load persistence file:', err);
-    }
-}
-// Save current state to disk
-function saveStorage() {
-    try {
-        const agentsObj = Object.fromEntries(agents);
-        const data = {
-            agents: agentsObj,
-            eventsHistory: eventsHistory.slice(0, 200),
-            alertsHistory: alertsHistory.slice(0, 100),
-            quarantineHistory: quarantineHistory.slice(0, 50),
-            discoveredDevices,
-            activeRules,
-        };
-        fs_1.default.writeFileSync(STORAGE_FILE, JSON.stringify(data, null, 2), 'utf-8');
-    }
-    catch (err) {
-        console.error('Failed to save persistence file:', err);
-    }
-}
-loadStorage();
 function readField(source, camel, snake, fallback) {
     return (source?.[camel] ?? source?.[snake] ?? fallback);
 }
@@ -222,6 +305,7 @@ function normalizeTelemetry(raw) {
         topProcesses: readField(raw, 'topProcesses', 'top_processes', []),
         networkConnections: readField(raw, 'networkConnections', 'network_connections', []),
         fileEvents: readField(raw, 'fileEvents', 'file_events', []),
+        securityFindings: readField(raw, 'securityFindings', 'security_findings', []),
     };
 }
 function runCommand(command, timeout = 10000) {
@@ -283,6 +367,236 @@ function checkPort(host, port, timeoutMs = 120) {
         });
         socket.connect(port, host);
     });
+}
+// ═══════════════════════════════════════════════════════════════════════════
+// Real-Time MITRE ATT&CK Deep Telemetry Correlation Engine v2.0
+// 19 rules — Process, Network, File, Behavior correlation
+// ═══════════════════════════════════════════════════════════════════════════
+function generateAlertId() {
+    return `alert-${Date.now()}-${Math.floor(Math.random() * 9999)}`;
+}
+async function fireAlert(agent, ruleId, ruleName, severity, details) {
+    const alert = {
+        alertId: generateAlertId(),
+        agentId: agent.agentId,
+        hostname: agent.hostname,
+        ruleId, ruleName, severity,
+        timestamp: new Date().toISOString(),
+        details,
+        status: 'ACTIVE'
+    };
+    alertsHistory.unshift(alert);
+    if (alertsHistory.length > 500)
+        alertsHistory.length = 500;
+    await (0, db_js_1.saveAlertToDb)(alert);
+    broadcastSSE('alert', alert);
+    console.log(`🚨 [DETECTION] ${severity} | ${ruleName} | ${agent.hostname} | ${details.substring(0, 120)}`);
+}
+// Known Windows system binaries and their expected paths
+const SYSTEM_BINARIES = {
+    'svchost.exe': ['c:\\windows\\system32\\svchost.exe', 'c:\\windows\\syswow64\\svchost.exe'],
+    'csrss.exe': ['c:\\windows\\system32\\csrss.exe'],
+    'lsass.exe': ['c:\\windows\\system32\\lsass.exe'],
+    'services.exe': ['c:\\windows\\system32\\services.exe'],
+    'winlogon.exe': ['c:\\windows\\system32\\winlogon.exe'],
+    'smss.exe': ['c:\\windows\\system32\\smss.exe'],
+    'wininit.exe': ['c:\\windows\\system32\\wininit.exe'],
+    'dwm.exe': ['c:\\windows\\system32\\dwm.exe'],
+};
+const LOLBINS = new Set([
+    'certutil.exe', 'mshta.exe', 'regsvr32.exe', 'rundll32.exe',
+    'bitsadmin.exe', 'wscript.exe', 'cscript.exe', 'msiexec.exe',
+    'installutil.exe', 'regasm.exe', 'regsvcs.exe', 'msxsl.exe',
+    'control.exe', 'presentationhost.exe', 'bash.exe',
+]);
+const OFFICE_PROCESSES = new Set(['winword.exe', 'excel.exe', 'powerpnt.exe', 'outlook.exe', 'msaccess.exe', 'mspub.exe']);
+const SHELL_PROCESSES = new Set(['cmd.exe', 'powershell.exe', 'pwsh.exe', 'wscript.exe', 'cscript.exe', 'bash.exe', 'mshta.exe']);
+const KNOWN_SYSTEM_PROCS = new Set(['system', 'idle', 'svchost.exe', 'csrss.exe', 'dwm.exe', 'lsass.exe', 'services.exe', 'wininit.exe', 'winlogon.exe', 'smss.exe', 'taskhostw.exe', 'runtimebroker.exe', 'explorer.exe', 'searchhost.exe', 'sihost.exe', 'ctfmon.exe']);
+const LATERAL_PORTS = new Set([445, 3389, 5985, 5986, 22, 23, 135, 139]);
+const SUSPICIOUS_C2_PORTS = new Set([4444, 6667, 1337, 8888, 31337, 9999, 1234, 5555, 7777, 13337]);
+async function evaluateATTACKRules(agent, payload) {
+    const procs = payload.topProcesses || [];
+    const conns = payload.networkConnections || [];
+    const files = payload.fileEvents || [];
+    const findings = payload.securityFindings || [];
+    // Build PID -> Process map for parent-child analysis
+    const pidMap = new Map();
+    for (const p of procs) {
+        pidMap.set(p.pid, p);
+    }
+    // ═══ 1. PowerShell Encoded Command [T1059.001] ═══
+    for (const proc of procs) {
+        const name = proc.name.toLowerCase();
+        const exe = proc.executablePath.toLowerCase();
+        if ((name.includes('powershell') || name.includes('pwsh')) &&
+            (exe.includes('-enc') || exe.includes('encodedcommand') || exe.includes('base64') || exe.includes('-nop') || exe.includes('bypass'))) {
+            await fireAlert(agent, 'RULE-WIN-001', 'PowerShell Encoded Command Execution', 'HIGH', `PID ${proc.pid} (${proc.name}) executou payload PowerShell codificado. Path: ${proc.executablePath}`);
+        }
+    }
+    // ═══ 2. LSASS Credential Dump [T1003.001] ═══
+    for (const proc of procs) {
+        if (proc.name.toLowerCase() === 'lsass.exe' && proc.cpuPct > 25) {
+            await fireAlert(agent, 'RULE-MEM-005', 'LSASS Memory Credential Dumping Attempt', 'CRITICAL', `Acesso anômalo ao processo LSASS detectado — PID ${proc.pid}, CPU: ${proc.cpuPct.toFixed(1)}%`);
+        }
+    }
+    // ═══ 3. Suspicious C2 Ports [T1071] ═══
+    for (const conn of conns) {
+        if (SUSPICIOUS_C2_PORTS.has(conn.remotePort) && conn.status === 'ESTABLISHED') {
+            await fireAlert(agent, 'RULE-NET-003', 'Suspicious Remote Port Outbound Socket', 'HIGH', `PID ${conn.pid} (${conn.processName}) conectou à porta suspeita ${conn.remotePort} em ${conn.remoteAddress}`);
+        }
+    }
+    // ═══ 4. Ransomware File Extensions [T1486] ═══
+    const ransomExts = ['.locked', '.crypto', '.enc', '.ransom', '.crypt', '.cerber', '.locky', '.wncry', '.wncryt', '.wcry'];
+    for (const fileEvt of files) {
+        const p = fileEvt.filePath.toLowerCase();
+        if (ransomExts.some(ext => p.endsWith(ext))) {
+            await fireAlert(agent, 'RULE-FILE-002', 'Ransomware Mass File Alteration Spike', 'CRITICAL', `Extensão ransomware detectada: ${fileEvt.filePath}`);
+        }
+    }
+    // ═══ 5. Process Masquerading [T1036.005] ═══
+    for (const proc of procs) {
+        const name = proc.name.toLowerCase();
+        const exe = proc.executablePath.toLowerCase().replace(/\//g, '\\');
+        if (SYSTEM_BINARIES[name]) {
+            const expected = SYSTEM_BINARIES[name];
+            if (exe && !expected.some(ep => exe === ep || exe.endsWith('\\' + name))) {
+                await fireAlert(agent, 'RULE-MASQ-012', 'System Binary Path Masquerading', 'CRITICAL', `${proc.name} executando de caminho inesperado: "${proc.executablePath}" (esperado: ${expected[0]})`);
+            }
+        }
+    }
+    // ═══ 6. Suspicious Parent-Child Chains [T1059] ═══
+    for (const proc of procs) {
+        const name = proc.name.toLowerCase();
+        const parentPid = proc.parentPid;
+        if (parentPid != null && SHELL_PROCESSES.has(name)) {
+            const parent = pidMap.get(parentPid);
+            if (parent && OFFICE_PROCESSES.has(parent.name.toLowerCase())) {
+                await fireAlert(agent, 'RULE-CHAIN-013', 'Suspicious Parent-Child Process Chain', 'HIGH', `Aplicação Office "${parent.name}" (PID ${parent.pid}) gerou shell "${proc.name}" (PID ${proc.pid}) — possível macro maliciosa`);
+            }
+        }
+        // svchost.exe should have services.exe as parent
+        if (name === 'svchost.exe' && parentPid != null) {
+            const parent = pidMap.get(parentPid);
+            if (parent && parent.name.toLowerCase() !== 'services.exe') {
+                await fireAlert(agent, 'RULE-CHAIN-013', 'Suspicious Parent-Child Process Chain', 'CRITICAL', `svchost.exe (PID ${proc.pid}) com pai inesperado: "${parent.name}" (PID ${parent.pid}) — deveria ser services.exe`);
+            }
+        }
+    }
+    // ═══ 7. LOLBin Execution [T1218] ═══
+    for (const proc of procs) {
+        if (LOLBINS.has(proc.name.toLowerCase())) {
+            await fireAlert(agent, 'RULE-LOL-014', 'Living-off-the-Land Binary Execution', 'HIGH', `LOLBin detectado em execução: ${proc.name} (PID ${proc.pid}) — Path: ${proc.executablePath}`);
+        }
+    }
+    // ═══ 8. C2 Beaconing Detection [T1071.001] ═══
+    const currentTargets = new Map();
+    for (const conn of conns) {
+        if (conn.status === 'ESTABLISHED' && conn.remoteAddress && conn.remotePort > 0) {
+            const key = `${conn.remoteAddress}:${conn.remotePort}`;
+            currentTargets.set(key, (currentTargets.get(key) || 0) + 1);
+        }
+    }
+    let history = agentTelemetryHistory.get(agent.agentId);
+    if (!history) {
+        history = { prevConnectionCount: 0, prevTimestamp: Date.now(), connectionTargets: new Map() };
+        agentTelemetryHistory.set(agent.agentId, history);
+    }
+    for (const [target, _count] of currentTargets) {
+        const prevCount = history.connectionTargets.get(target) || 0;
+        const consecutive = prevCount + 1;
+        history.connectionTargets.set(target, consecutive);
+        // If same target appears in 3+ consecutive heartbeats, flag as beaconing
+        if (consecutive >= 3) {
+            await fireAlert(agent, 'RULE-BEACON-015', 'C2 Beaconing Regular Interval Detection', 'CRITICAL', `Conexão persistente para ${target} detectada em ${consecutive} heartbeats consecutivos — possível C2 beaconing`);
+            history.connectionTargets.set(target, 0); // Reset to avoid alert spam
+        }
+    }
+    // Clear targets no longer present
+    for (const [target] of history.connectionTargets) {
+        if (!currentTargets.has(target))
+            history.connectionTargets.delete(target);
+    }
+    // ═══ 9. Data Exfiltration Volume Spike [T1041] ═══
+    const currentConnCount = conns.filter(c => c.status === 'ESTABLISHED').length;
+    if (history.prevConnectionCount > 0 && currentConnCount > history.prevConnectionCount * 3 && currentConnCount > 10) {
+        await fireAlert(agent, 'RULE-EXFIL-016', 'Data Exfiltration Connection Volume Spike', 'HIGH', `Spike de conexões: ${history.prevConnectionCount} → ${currentConnCount} (${(currentConnCount / history.prevConnectionCount).toFixed(1)}x) — possível exfiltração`);
+    }
+    history.prevConnectionCount = currentConnCount;
+    history.prevTimestamp = Date.now();
+    // ═══ 10. Cryptominer Detection [T1496] ═══
+    if (payload.cpuUsagePct > 85) {
+        const topProc = procs.sort((a, b) => b.cpuPct - a.cpuPct)[0];
+        if (topProc && !KNOWN_SYSTEM_PROCS.has(topProc.name.toLowerCase())) {
+            await fireAlert(agent, 'RULE-MINER-017', 'Cryptominer High CPU Anomaly', 'HIGH', `CPU do endpoint em ${payload.cpuUsagePct.toFixed(1)}% — processo principal: ${topProc.name} (PID ${topProc.pid}, CPU: ${topProc.cpuPct.toFixed(1)}%)`);
+        }
+    }
+    // ═══ 11. Resource Exhaustion [T1499] ═══
+    if (payload.cpuUsagePct > 85 || payload.memoryUsagePct > 90) {
+        await fireAlert(agent, 'RULE-RES-004', 'Endpoint High Resource Exhaustion Spike', 'WARNING', `Recursos críticos: CPU ${payload.cpuUsagePct.toFixed(1)}% | RAM ${payload.memoryUsagePct.toFixed(1)}%`);
+    }
+    // ═══ 12. DNS Tunneling [T1071.004] ═══
+    const dnsConns = conns.filter(c => c.remotePort === 53 && c.protocol.toUpperCase().includes('UDP'));
+    if (dnsConns.length > 10) {
+        await fireAlert(agent, 'RULE-NET-008', 'DNS Tunneling High Frequency Query Exfiltration', 'HIGH', `${dnsConns.length} conexões DNS UDP detectadas neste heartbeat — possível túnel DNS para exfiltração`);
+    }
+    // ═══ 13. Lateral Movement [T1021] ═══
+    for (const conn of conns) {
+        if (LATERAL_PORTS.has(conn.remotePort) && conn.status === 'ESTABLISHED') {
+            const procName = conn.processName.toLowerCase();
+            // Skip expected admin tools
+            if (!['svchost.exe', 'services.exe', 'system', 'lsass.exe'].includes(procName)) {
+                await fireAlert(agent, 'RULE-LATERAL-018', 'Lateral Movement Outbound Connection', 'HIGH', `Processo "${conn.processName}" (PID ${conn.pid}) conectou à porta lateral ${conn.remotePort} em ${conn.remoteAddress}`);
+            }
+        }
+    }
+    // ═══ 14. WMI Execution [T1047] ═══
+    for (const proc of procs) {
+        if (proc.name.toLowerCase() === 'wmic.exe' || proc.name.toLowerCase() === 'wmiprvse.exe') {
+            await fireAlert(agent, 'RULE-CMD-009', 'WMI Administrative Command Line Execution', 'INFO', `Processo WMI detectado: ${proc.name} (PID ${proc.pid}) — Path: ${proc.executablePath}`);
+        }
+    }
+    // ═══ 15. System32 File Alteration [T1554] ═══
+    for (const fileEvt of files) {
+        const fp = fileEvt.filePath.toLowerCase().replace(/\//g, '\\');
+        if ((fp.includes('\\windows\\system32\\') || fp.includes('\\windows\\syswow64\\')) &&
+            (fileEvt.action === 'MODIFIED' || fileEvt.action === 'CREATED' || fileEvt.action === 'DELETED')) {
+            await fireAlert(agent, 'RULE-SYS-007', 'Unauthorized System File Alteration in System32', 'HIGH', `Alteração em arquivo do sistema: ${fileEvt.filePath} (${fileEvt.action})`);
+        }
+    }
+    // ═══ 16. Agent Security Findings Escalation ═══
+    for (const finding of findings) {
+        if (finding.severity === 'HIGH' || finding.severity === 'CRITICAL') {
+            await fireAlert(agent, 'RULE-FINDING-019', `Agent Finding: ${finding.findingType}`, finding.severity, `[${finding.mitreId}] ${finding.description} | Evidência: ${finding.evidence}`);
+        }
+    }
+    // ═══ 17. YARA Signature Matching ═══
+    for (const fileEvt of files) {
+        if (fileEvt.yaraMatches && fileEvt.yaraMatches.length > 0) {
+            for (const matchName of fileEvt.yaraMatches) {
+                await fireAlert(agent, 'RULE-YARA-020', 'YARA Signature Match Detection', 'CRITICAL', `Assinatura YARA "${matchName}" detectada no arquivo: ${fileEvt.filePath}`);
+            }
+        }
+        // Also evaluate built-in YARA strings on executable path / filenames
+        const fpath = fileEvt.filePath.toLowerCase();
+        for (const rule of builtInYaraRules) {
+            for (const str of rule.strings) {
+                if (fpath.includes(str.toLowerCase())) {
+                    await fireAlert(agent, 'RULE-YARA-020', `YARA: ${rule.name}`, rule.severity, `[${rule.mitreId}] Padrão YARA "${str}" detectado no arquivo: ${fileEvt.filePath}`);
+                }
+            }
+        }
+    }
+    // Also check top process commandlines against YARA strings
+    for (const proc of procs) {
+        const exe = proc.executablePath.toLowerCase();
+        for (const rule of builtInYaraRules) {
+            for (const str of rule.strings) {
+                if (exe.includes(str.toLowerCase())) {
+                    await fireAlert(agent, 'RULE-YARA-020', `YARA: ${rule.name}`, rule.severity, `[${rule.mitreId}] Padrão YARA "${str}" detectado na linha de comando do processo ${proc.name} (PID ${proc.pid})`);
+                }
+            }
+        }
+    }
 }
 // Deep Multi-Protocol Device Recognition Engine
 async function performDeepNetworkDiscovery(targetSubnet) {
@@ -380,7 +694,7 @@ async function performDeepNetworkDiscovery(targetSubnet) {
             discovered.push(item);
     }
     discoveredDevices = discovered;
-    saveStorage();
+    await (0, db_js_1.saveDiscoveredDevicesToDb)(discoveredDevices);
     broadcastSSE('network_scan_complete', discoveredDevices);
     return discovered;
 }
@@ -400,10 +714,24 @@ app.post('/api/v1/network/scan', async (req, res) => {
 // GET /api/v1/network/scan/latest
 app.get('/api/v1/network/scan/latest', async (_req, res) => {
     if (discoveredDevices.length === 0) {
+        discoveredDevices = await (0, db_js_1.loadDiscoveredDevicesFromDb)();
+    }
+    if (discoveredDevices.length === 0) {
         const detectedSubnets = getLocalSubnets();
         await performDeepNetworkDiscovery(detectedSubnets[0] || '192.168.50');
     }
     res.json(discoveredDevices);
+});
+// GET /download/agent.py (Direct HTTP Download Endpoint for Android Phones / Termux)
+app.get('/download/agent.py', (_req, res) => {
+    const agentPath = path_1.default.join(process.cwd(), '..', 'guardian-agent', 'guardian_termux_agent.py');
+    if (fs_1.default.existsSync(agentPath)) {
+        res.setHeader('Content-Type', 'text/plain');
+        res.sendFile(agentPath);
+    }
+    else {
+        res.status(404).send('Agent script file not found');
+    }
 });
 // GET /api/v1/stream (Server-Sent Events Real-Time Live Feed)
 app.get('/api/v1/stream', (req, res) => {
@@ -496,24 +824,55 @@ app.get('/api/v1/files', (_req, res) => {
     }
     res.json(allFiles);
 });
-// GET /api/v1/quarantine
-app.get('/api/v1/quarantine', (_req, res) => {
-    res.json(quarantineHistory);
-});
 // GET /api/v1/rules
 app.get('/api/v1/rules', (_req, res) => {
     res.json(activeRules);
+});
+// GET /api/v1/yara/rules
+app.get('/api/v1/yara/rules', (_req, res) => {
+    res.json(builtInYaraRules);
 });
 // GET /api/v1/alerts
 app.get('/api/v1/alerts', (_req, res) => {
     res.json(alertsHistory);
 });
-// GET /api/v1/events
-app.get('/api/v1/events', (_req, res) => {
-    res.json(eventsHistory.slice(0, 100));
+// POST /api/v1/rules/create
+app.post('/api/v1/rules/create', (req, res) => {
+    const newRule = req.body;
+    if (!newRule.ruleId || !newRule.name) {
+        return res.status(400).json({ error: 'ruleId and name are required' });
+    }
+    activeRules.unshift(newRule);
+    res.status(201).json({ status: 'created', rule: newRule });
+});
+// DELETE /api/v1/agents/:agentId (Remove Agent from DB and Memory)
+app.delete('/api/v1/agents/:agentId', async (req, res) => {
+    const { agentId } = req.params;
+    console.log(`🗑️ Deleting agent ${agentId} from memory and SQL database...`);
+    agents.delete(agentId);
+    await (0, db_js_1.deleteAgentFromDb)(agentId);
+    broadcastSSE('agent_deleted', { agentId });
+    res.json({ status: 'deleted', agentId });
+});
+// POST /api/v1/response/kill
+app.post('/api/v1/response/kill', (req, res) => {
+    const { agentId, pid } = req.body;
+    console.log(`☠️ Execution response kill sent for process PID ${pid} on agent ${agentId}`);
+    res.json({ status: 'sent', agentId, pid });
+});
+// POST /api/v1/response/isolate
+app.post('/api/v1/response/isolate', (req, res) => {
+    const { agentId } = req.body;
+    const agent = agents.get(agentId);
+    if (agent) {
+        agent.status = 'isolated';
+        (0, db_js_1.saveAgentToDb)(agent);
+    }
+    console.log(`🔒 Network isolation command sent to agent ${agentId}`);
+    res.json({ status: 'isolated', agentId });
 });
 // POST /api/v1/agents/register (Protected by verifyAgentToken & DEDUPLICATED BY HOSTNAME)
-app.post('/api/v1/agents/register', verifyAgentToken, (req, res) => {
+app.post('/api/v1/agents/register', verifyAgentToken, async (req, res) => {
     const inventory = normalizeInventory(req.body);
     if (!inventory.hostname) {
         return res.status(400).json({ error: 'Hostname is required' });
@@ -543,13 +902,12 @@ app.post('/api/v1/agents/register', verifyAgentToken, (req, res) => {
         fileEvents: [],
     };
     agents.set(agentId, updatedAgent);
-    saveStorage();
-    (0, db_js_1.saveAgentToDb)(updatedAgent);
+    await (0, db_js_1.saveAgentToDb)(updatedAgent);
     broadcastSSE('agent_registered', updatedAgent);
     res.status(201).json({ agentId, status: 'registered', expectedPayloadCase: 'camelCase_or_snake_case' });
 });
-// POST /api/v1/agents/heartbeat (Protected by verifyAgentToken)
-app.post('/api/v1/agents/heartbeat', verifyAgentToken, (req, res) => {
+// POST /api/v1/agents/heartbeat (Protected by verifyAgentToken & EVALUATES MITRE ATT&CK RULES)
+app.post('/api/v1/agents/heartbeat', verifyAgentToken, async (req, res) => {
     const payload = normalizeTelemetry(req.body);
     let agent = agents.get(payload.agentId);
     if (!agent) {
@@ -561,6 +919,7 @@ app.post('/api/v1/agents/heartbeat', verifyAgentToken, (req, res) => {
         }
     }
     if (!agent) {
+        console.warn(`⚠️ Heartbeat from unregistered agent: ${payload.agentId}`);
         return res.status(404).json({ error: 'Agent not registered' });
     }
     agent.lastHeartbeat = new Date().toISOString();
@@ -573,24 +932,43 @@ app.post('/api/v1/agents/heartbeat', verifyAgentToken, (req, res) => {
         diskUsagePct: payload.diskUsagePct,
         activeProcessesCount: payload.activeProcessesCount,
     };
-    if (payload.topProcesses) {
+    if (payload.topProcesses && payload.topProcesses.length > 0) {
         agent.topProcesses = payload.topProcesses;
     }
-    if (payload.networkConnections) {
+    if (payload.networkConnections && payload.networkConnections.length > 0) {
         agent.networkConnections = payload.networkConnections;
     }
-    if (payload.fileEvents) {
+    if (payload.fileEvents && payload.fileEvents.length > 0) {
         agent.fileEvents = payload.fileEvents;
     }
-    (0, db_js_1.saveAgentToDb)(agent);
+    // Evaluate Telemetry against Real-Time ATT&CK Correlation Engine
+    await evaluateATTACKRules(agent, payload);
+    // Save to SQLite Database Tables
+    await (0, db_js_1.saveAgentToDb)(agent);
+    await (0, db_js_1.saveTelemetryToDb)(agent.agentId, agent.topProcesses || [], agent.networkConnections || [], agent.fileEvents || []);
+    broadcastSSE('telemetry', { agentId: agent.agentId, hostname: agent.hostname });
+    console.log(`📥 [HEARTBEAT & CORRELATION EVALUATED] ${agent.hostname} | CPU: ${payload.cpuUsagePct.toFixed(1)}% | Procs: ${(payload.topProcesses || []).length} | Net: ${(payload.networkConnections || []).length}`);
     res.json({ status: 'acknowledged', nextHeartbeatIntervalSec: 30 });
 });
-// Start DB Initialization & Server Listen & Deep Discovery
-(0, db_js_1.initDatabase)().then(() => {
-    app.listen(PORT, () => {
-        console.log(`🛡️ Guardian Core API Server running on port ${PORT} [Deep Discovery Engine Active]`);
-        // Deep Discovery on Startup
+// Start DB Initialization & Server Listen & Deep Discovery on ALL physical subnets
+(0, db_js_1.initDatabase)().then(async () => {
+    // Load initial SQL data
+    const dbAgents = await (0, db_js_1.loadAgentsFromDb)();
+    for (const ag of dbAgents) {
+        agents.set(ag.agentId, ag);
+    }
+    discoveredDevices = await (0, db_js_1.loadDiscoveredDevicesFromDb)();
+    app.listen(PORT, async () => {
         const detectedSubnets = getLocalSubnets();
-        performDeepNetworkDiscovery(detectedSubnets[0] || '192.168.50');
+        console.log(`🛡️ Guardian Core API Server running on port ${PORT} [MITRE ATT&CK Engine Active]`);
+        console.log(`📡 Detected subnets (priority order): ${detectedSubnets.join(', ')}`);
+        // Scan ALL physical subnets on startup to find all devices
+        for (const subnet of detectedSubnets) {
+            if (subnet.startsWith('172.'))
+                continue;
+            console.log(`🔍 Starting deep discovery on ${subnet}.0/24...`);
+            const devices = await performDeepNetworkDiscovery(subnet);
+            console.log(`✅ Found ${devices.length} devices on ${subnet}.0/24`);
+        }
     });
 });

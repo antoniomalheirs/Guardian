@@ -35,6 +35,7 @@ export interface FileTelemetry {
   action: 'CREATED' | 'MODIFIED' | 'DELETED' | 'RENAMED';
   fileSizeBytes: number;
   timestamp: string;
+  yaraMatches?: string[];
 }
 
 export interface QuarantineRecord {
@@ -67,6 +68,14 @@ export interface NetworkScanResult {
   devices: DiscoveredDevice[];
 }
 
+export interface SecurityFinding {
+  findingType: string;
+  severity: 'INFO' | 'WARNING' | 'HIGH' | 'CRITICAL';
+  description: string;
+  evidence: string;
+  mitreId: string;
+}
+
 export interface TelemetryPayload {
   agentId: string;
   timestamp: string;
@@ -78,6 +87,7 @@ export interface TelemetryPayload {
   topProcesses?: ProcessTelemetry[];
   networkConnections?: NetworkTelemetry[];
   fileEvents?: FileTelemetry[];
+  securityFindings?: SecurityFinding[];
 }
 
 export interface AgentRecord {
@@ -128,4 +138,14 @@ export interface EDREvent {
   severity: 'INFO' | 'WARNING' | 'HIGH' | 'CRITICAL';
   description: string;
   details: Record<string, any>;
+}
+
+export interface YaraRule {
+  ruleId: string;
+  name: string;
+  threatType: 'MIMIKATZ' | 'COBALT_STRIKE' | 'WEBSHELL' | 'RANSOMWARE' | 'EXPLOIT';
+  severity: 'WARNING' | 'HIGH' | 'CRITICAL';
+  strings: string[];
+  description: string;
+  mitreId: string;
 }

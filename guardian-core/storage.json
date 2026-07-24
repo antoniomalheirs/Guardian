@@ -6,24 +6,194 @@
       "status": "online",
       "inventory": {
         "hostname": "SentinelPC",
-        "os_name": "Windows",
-        "os_version": "11 (26200)",
+        "osName": "Windows",
+        "osVersion": "11 (26200)",
         "architecture": "x64",
-        "cpu_model": "AMD Ryzen 7 5700X3D 8-Core Processor           ",
-        "total_memory_mb": 32682,
-        "ip_address": "127.0.0.1",
-        "mac_address": "00:00:00:00:00:00"
+        "cpuModel": "AMD Ryzen 7 5700X3D 8-Core Processor           ",
+        "totalMemoryMb": 32682,
+        "ipAddress": "192.168.50.140",
+        "macAddress": "00:00:00:00:00:00"
       },
-      "lastHeartbeat": "2026-07-24T20:40:18.062Z",
+      "lastHeartbeat": "2026-07-24T21:34:00.979Z",
       "metrics": {
-        "cpuUsagePct": 0,
-        "memoryUsagePct": 0,
-        "diskUsagePct": 0,
-        "activeProcessesCount": 0
+        "cpuUsagePct": 17.96901,
+        "memoryUsagePct": 61.241306,
+        "diskUsagePct": 45,
+        "activeProcessesCount": 384
       },
-      "topProcesses": [],
-      "networkConnections": [],
-      "fileEvents": []
+      "topProcesses": [
+        {
+          "pid": 2632,
+          "parentPid": 1452,
+          "name": "svchost.exe",
+          "executablePath": "",
+          "cpuPct": 0,
+          "memoryMb": 10,
+          "sha256Hash": "N/A"
+        },
+        {
+          "pid": 5680,
+          "parentPid": 4480,
+          "name": "dasHost.exe",
+          "executablePath": "",
+          "cpuPct": 0,
+          "memoryMb": 13,
+          "sha256Hash": "N/A"
+        },
+        {
+          "pid": 115084,
+          "parentPid": 11628,
+          "name": "GitHubDesktop.exe",
+          "executablePath": "C:\\Users\\Zeca\\AppData\\Local\\GitHubDesktop\\app-3.6.3\\GitHubDesktop.exe",
+          "cpuPct": 0.052083336,
+          "memoryMb": 104,
+          "sha256Hash": "36c196830f0eba3d3ffb142f1b0bbf74ca8f6ed58fdcee871f4d23ef5e60aa13"
+        },
+        {
+          "pid": 22540,
+          "parentPid": 1452,
+          "name": "svchost.exe",
+          "executablePath": "",
+          "cpuPct": 0,
+          "memoryMb": 8,
+          "sha256Hash": "N/A"
+        },
+        {
+          "pid": 1716,
+          "parentPid": 1368,
+          "name": "fontdrvhost.exe",
+          "executablePath": "",
+          "cpuPct": 0,
+          "memoryMb": 4,
+          "sha256Hash": "N/A"
+        },
+        {
+          "pid": 11920,
+          "parentPid": 1684,
+          "name": "CrossDeviceService.exe",
+          "executablePath": "C:\\Program Files\\WindowsApps\\MicrosoftWindows.CrossDevice_1.26061.91.0_x64__cw5n1h2txyewy\\CrossDeviceService.exe",
+          "cpuPct": 0.36458334,
+          "memoryMb": 104,
+          "sha256Hash": "0700fa9a6c6a1018b5a15fa9ee2b50e9d304e46bb89ff2ca7b8298fe17772204"
+        },
+        {
+          "pid": 9208,
+          "parentPid": 1452,
+          "name": "gamingservicesnet.exe",
+          "executablePath": "",
+          "cpuPct": 0,
+          "memoryMb": 11,
+          "sha256Hash": "N/A"
+        },
+        {
+          "pid": 8576,
+          "parentPid": 1452,
+          "name": "svchost.exe",
+          "executablePath": "",
+          "cpuPct": 0,
+          "memoryMb": 16,
+          "sha256Hash": "N/A"
+        },
+        {
+          "pid": 10692,
+          "parentPid": 1684,
+          "name": "dllhost.exe",
+          "executablePath": "C:\\Windows\\System32\\dllhost.exe",
+          "cpuPct": 0,
+          "memoryMb": 18,
+          "sha256Hash": "834dd7b48347e580a944738ce1ad5b3f41fb689173708f2e9aaebe091597c9bc"
+        },
+        {
+          "pid": 24560,
+          "parentPid": 104500,
+          "name": "powershell.exe",
+          "executablePath": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+          "cpuPct": 0,
+          "memoryMb": 71,
+          "sha256Hash": "7600ffe12da441fe89d035b13801e8e91d064bc544a27b19a5cf49f6ab8b18f5"
+        },
+        {
+          "pid": 19356,
+          "parentPid": 3500,
+          "name": "ctfmon.exe",
+          "executablePath": "C:\\Windows\\System32\\ctfmon.exe",
+          "cpuPct": 0.10416667,
+          "memoryMb": 35,
+          "sha256Hash": "e0346762613786654df3abeb529681a1549e7d2485b47ff294daf14cfd4fdbf0"
+        },
+        {
+          "pid": 16164,
+          "parentPid": 15120,
+          "name": "msedgewebview2.exe",
+          "executablePath": "C:\\Program Files (x86)\\Microsoft\\EdgeWebView\\Application\\150.0.4078.83\\msedgewebview2.exe",
+          "cpuPct": 0,
+          "memoryMb": 40,
+          "sha256Hash": "e512992ed0a6981e4c5a0182ed41ca80ee5b06b0bbb1f35ae25c0f115ab23410"
+        },
+        {
+          "pid": 2748,
+          "parentPid": 1452,
+          "name": "svchost.exe",
+          "executablePath": "",
+          "cpuPct": 0,
+          "memoryMb": 9,
+          "sha256Hash": "N/A"
+        },
+        {
+          "pid": 30404,
+          "parentPid": 5936,
+          "name": "Docker Desktop.exe",
+          "executablePath": "C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe",
+          "cpuPct": 0,
+          "memoryMb": 10,
+          "sha256Hash": "3ae53e221c898435a195ed2504042e3e14ac31aa08f0b99784d34f6946455da8"
+        },
+        {
+          "pid": 15292,
+          "parentPid": 1684,
+          "name": "WidgetService.exe",
+          "executablePath": "C:\\Program Files\\WindowsApps\\Microsoft.WidgetsPlatformRuntime_1.6.19.0_x64__8wekyb3d8bbwe\\WidgetService\\WidgetService.exe",
+          "cpuPct": 0,
+          "memoryMb": 27,
+          "sha256Hash": "c9ef9e2982d1816954fbb4a184eb509034f82bcc958bdd443075d80e35af04ba"
+        }
+      ],
+      "networkConnections": [
+        {
+          "pid": 117208,
+          "processName": "guardian-agent.exe",
+          "protocol": "TCP",
+          "localAddress": "127.0.0.1",
+          "localPort": 54120,
+          "remoteAddress": "127.0.0.1",
+          "remotePort": 4000,
+          "status": "ESTABLISHED"
+        },
+        {
+          "pid": 1420,
+          "processName": "svchost.exe",
+          "protocol": "UDP",
+          "localAddress": "0.0.0.0",
+          "localPort": 53,
+          "remoteAddress": "0.0.0.0",
+          "remotePort": 0,
+          "status": "LISTENING"
+        }
+      ],
+      "fileEvents": [
+        {
+          "filePath": "C:\\Windows\\System32\\drivers\\etc\\hosts",
+          "action": "MODIFIED",
+          "fileSizeBytes": 824,
+          "timestamp": "2026-07-24T21:34:00.978002700+00:00"
+        },
+        {
+          "filePath": "C:\\ProgramData\\Guardian\\logs\\agent.log",
+          "action": "CREATED",
+          "fileSizeBytes": 4096,
+          "timestamp": "2026-07-24T21:34:00.978009300+00:00"
+        }
+      ]
     }
   },
   "eventsHistory": [],
@@ -32,7 +202,7 @@
   "discoveredDevices": [
     {
       "ipAddress": "192.168.50.1",
-      "macAddress": "BC-0F-9A-DE-CC-6C",
+      "macAddress": "BC:0F:9A:DE:CC:6C",
       "vendorName": "Gateway Roteador / Access Point (192.168.50.1)",
       "deviceType": "ROUTER",
       "openPorts": [
@@ -41,7 +211,83 @@
       ],
       "riskScore": "LOW",
       "detectedThreats": [],
-      "lastSeen": "2026-07-24T20:41:07.704Z"
+      "lastSeen": "2026-07-24T21:28:00.535Z"
+    },
+    {
+      "ipAddress": "192.168.50.2",
+      "macAddress": "E0:1C:FC:02:B6:B9",
+      "vendorName": "Dispositivo Conectado (192.168.50.2)",
+      "deviceType": "IOT",
+      "openPorts": [
+        80,
+        443
+      ],
+      "riskScore": "LOW",
+      "detectedThreats": [],
+      "lastSeen": "2026-07-24T21:28:00.535Z"
+    },
+    {
+      "ipAddress": "192.168.50.3",
+      "macAddress": "BC:0F:9A:DE:CB:CC",
+      "vendorName": "Dispositivo Conectado (192.168.50.3)",
+      "deviceType": "IOT",
+      "openPorts": [
+        80,
+        443
+      ],
+      "riskScore": "LOW",
+      "detectedThreats": [],
+      "lastSeen": "2026-07-24T21:28:00.535Z"
+    },
+    {
+      "ipAddress": "192.168.50.6",
+      "macAddress": "D2:A4:C2:9E:E2:E6",
+      "vendorName": "Dispositivo Conectado (192.168.50.6)",
+      "deviceType": "IOT",
+      "openPorts": [],
+      "riskScore": "LOW",
+      "detectedThreats": [],
+      "lastSeen": "2026-07-24T21:28:00.752Z"
+    },
+    {
+      "ipAddress": "192.168.50.92",
+      "macAddress": "C0:16:93:3C:CE:AE",
+      "vendorName": "Dispositivo Conectado (192.168.50.92)",
+      "deviceType": "IOT",
+      "openPorts": [],
+      "riskScore": "LOW",
+      "detectedThreats": [],
+      "lastSeen": "2026-07-24T21:28:00.752Z"
+    },
+    {
+      "ipAddress": "192.168.50.102",
+      "macAddress": "E8:5A:8B:E3:23:67",
+      "vendorName": "Dispositivo Conectado (192.168.50.102)",
+      "deviceType": "IOT",
+      "openPorts": [],
+      "riskScore": "LOW",
+      "detectedThreats": [],
+      "lastSeen": "2026-07-24T21:28:00.752Z"
+    },
+    {
+      "ipAddress": "192.168.50.106",
+      "macAddress": "AA:FE:BA:84:34:53",
+      "vendorName": "Dispositivo Conectado (192.168.50.106)",
+      "deviceType": "IOT",
+      "openPorts": [],
+      "riskScore": "LOW",
+      "detectedThreats": [],
+      "lastSeen": "2026-07-24T21:28:00.752Z"
+    },
+    {
+      "ipAddress": "192.168.50.134",
+      "macAddress": "1C:E2:09:D3:80:44",
+      "vendorName": "Dispositivo Conectado (192.168.50.134)",
+      "deviceType": "IOT",
+      "openPorts": [],
+      "riskScore": "LOW",
+      "detectedThreats": [],
+      "lastSeen": "2026-07-24T21:28:00.752Z"
     },
     {
       "ipAddress": "192.168.50.140",
@@ -57,43 +303,7 @@
       "detectedThreats": [
         "Porta SMB 445 Aberta (Vulnerabilidade Potencial Windows / Worms)"
       ],
-      "lastSeen": "2026-07-24T20:41:07.485Z"
-    },
-    {
-      "ipAddress": "192.168.50.2",
-      "macAddress": "E0-1C-FC-02-B6-B9",
-      "vendorName": "Dispositivo Conectado (192.168.50.2)",
-      "deviceType": "IOT",
-      "openPorts": [
-        80,
-        443
-      ],
-      "riskScore": "LOW",
-      "detectedThreats": [],
-      "lastSeen": "2026-07-24T20:41:07.704Z"
-    },
-    {
-      "ipAddress": "192.168.50.3",
-      "macAddress": "BC-0F-9A-DE-CB-CC",
-      "vendorName": "Dispositivo Conectado (192.168.50.3)",
-      "deviceType": "IOT",
-      "openPorts": [
-        80,
-        443
-      ],
-      "riskScore": "LOW",
-      "detectedThreats": [],
-      "lastSeen": "2026-07-24T20:41:07.704Z"
-    },
-    {
-      "ipAddress": "192.168.50.92",
-      "macAddress": "C0-16-93-3C-CE-AE",
-      "vendorName": "Dispositivo Conectado (192.168.50.92)",
-      "deviceType": "IOT",
-      "openPorts": [],
-      "riskScore": "LOW",
-      "detectedThreats": [],
-      "lastSeen": "2026-07-24T20:41:07.921Z"
+      "lastSeen": "2026-07-24T21:28:00.318Z"
     }
   ],
   "activeRules": [
