@@ -1,0 +1,18 @@
+[package]
+name = "guardian-agent"
+version = "0.1.0"
+edition = "2021"
+authors = ["Guardian EDR Team"]
+description = "Guardian EDR Endpoint Agent in Rust"
+
+[dependencies]
+tokio = { version = "1.38", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+reqwest = { version = "0.12", features = ["json"] }
+sysinfo = "0.30"
+chrono = { version = "0.4", features = ["serde"] }
+sha2 = "0.10"
+hex = "0.4"
+tracing = "0.1"
+tracing-subscriber = "0.3"

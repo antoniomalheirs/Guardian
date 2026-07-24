@@ -1,0 +1,181 @@
+{
+  "agents": {
+    "agent-sentinelpc": {
+      "agentId": "agent-sentinelpc",
+      "hostname": "SentinelPC",
+      "status": "online",
+      "inventory": {
+        "hostname": "SentinelPC",
+        "os_name": "Windows",
+        "os_version": "11 (26200)",
+        "architecture": "x64",
+        "cpu_model": "AMD Ryzen 7 5700X3D 8-Core Processor           ",
+        "total_memory_mb": 32682,
+        "ip_address": "127.0.0.1",
+        "mac_address": "00:00:00:00:00:00"
+      },
+      "lastHeartbeat": "2026-07-24T20:40:18.062Z",
+      "metrics": {
+        "cpuUsagePct": 0,
+        "memoryUsagePct": 0,
+        "diskUsagePct": 0,
+        "activeProcessesCount": 0
+      },
+      "topProcesses": [],
+      "networkConnections": [],
+      "fileEvents": []
+    }
+  },
+  "eventsHistory": [],
+  "alertsHistory": [],
+  "quarantineHistory": [],
+  "discoveredDevices": [
+    {
+      "ipAddress": "192.168.50.1",
+      "macAddress": "BC-0F-9A-DE-CC-6C",
+      "vendorName": "Gateway Roteador / Access Point (192.168.50.1)",
+      "deviceType": "ROUTER",
+      "openPorts": [
+        80,
+        443
+      ],
+      "riskScore": "LOW",
+      "detectedThreats": [],
+      "lastSeen": "2026-07-24T20:41:07.704Z"
+    },
+    {
+      "ipAddress": "192.168.50.140",
+      "macAddress": "00-15-5D-REAL-IP",
+      "vendorName": "Estação Windows Principal (192.168.50.140)",
+      "deviceType": "WINDOWS",
+      "openPorts": [
+        135,
+        139,
+        445
+      ],
+      "riskScore": "HIGH",
+      "detectedThreats": [
+        "Porta SMB 445 Aberta (Vulnerabilidade Potencial Windows / Worms)"
+      ],
+      "lastSeen": "2026-07-24T20:41:07.485Z"
+    },
+    {
+      "ipAddress": "192.168.50.2",
+      "macAddress": "E0-1C-FC-02-B6-B9",
+      "vendorName": "Dispositivo Conectado (192.168.50.2)",
+      "deviceType": "IOT",
+      "openPorts": [
+        80,
+        443
+      ],
+      "riskScore": "LOW",
+      "detectedThreats": [],
+      "lastSeen": "2026-07-24T20:41:07.704Z"
+    },
+    {
+      "ipAddress": "192.168.50.3",
+      "macAddress": "BC-0F-9A-DE-CB-CC",
+      "vendorName": "Dispositivo Conectado (192.168.50.3)",
+      "deviceType": "IOT",
+      "openPorts": [
+        80,
+        443
+      ],
+      "riskScore": "LOW",
+      "detectedThreats": [],
+      "lastSeen": "2026-07-24T20:41:07.704Z"
+    },
+    {
+      "ipAddress": "192.168.50.92",
+      "macAddress": "C0-16-93-3C-CE-AE",
+      "vendorName": "Dispositivo Conectado (192.168.50.92)",
+      "deviceType": "IOT",
+      "openPorts": [],
+      "riskScore": "LOW",
+      "detectedThreats": [],
+      "lastSeen": "2026-07-24T20:41:07.921Z"
+    }
+  ],
+  "activeRules": [
+    {
+      "ruleId": "RULE-WIN-001",
+      "name": "PowerShell Encoded Command Execution",
+      "category": "PROCESS",
+      "severity": "HIGH",
+      "description": "Detects powershell.exe executing base64 encoded payloads (-EncodedCommand / -enc) [MITRE T1059.001]",
+      "enabled": true
+    },
+    {
+      "ruleId": "RULE-FILE-002",
+      "name": "Ransomware Mass File Alteration Spike",
+      "category": "FILE",
+      "severity": "CRITICAL",
+      "description": "Detects rapid mass modification or renaming of files in user directories [MITRE T1486]",
+      "enabled": true
+    },
+    {
+      "ruleId": "RULE-NET-003",
+      "name": "Suspicious Remote Port Outbound Socket",
+      "category": "NETWORK",
+      "severity": "HIGH",
+      "description": "Detects outbound connections to non-standard remote ports (ex: 4444, 6667) [MITRE T1071]",
+      "enabled": true
+    },
+    {
+      "ruleId": "RULE-RES-004",
+      "name": "Endpoint High Resource Exhaustion Spike",
+      "category": "BEHAVIOR",
+      "severity": "WARNING",
+      "description": "Triggers when endpoint CPU exceeds 85% or Memory exceeds 90% [MITRE T1499]",
+      "enabled": true
+    },
+    {
+      "ruleId": "RULE-MEM-005",
+      "name": "LSASS Memory Credential Dumping Attempt",
+      "category": "PROCESS",
+      "severity": "CRITICAL",
+      "description": "Detects processes reading or dumping lsass.exe memory for credential harvesting [MITRE T1003.001]",
+      "enabled": true
+    },
+    {
+      "ruleId": "RULE-REG-006",
+      "name": "Registry Run Key Auto-Start Persistence Addition",
+      "category": "BEHAVIOR",
+      "severity": "WARNING",
+      "description": "Detects registry additions to autostart keys (HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run) [MITRE T1547.001]",
+      "enabled": true
+    },
+    {
+      "ruleId": "RULE-SYS-007",
+      "name": "Unauthorized System File Alteration in System32",
+      "category": "FILE",
+      "severity": "HIGH",
+      "description": "Detects modification of critical Windows drivers or system binaries [MITRE T1554]",
+      "enabled": true
+    },
+    {
+      "ruleId": "RULE-NET-008",
+      "name": "DNS Tunneling High Frequency Query Exfiltration",
+      "category": "NETWORK",
+      "severity": "HIGH",
+      "description": "Detects high frequency UDP port 53 traffic used for C2 covert data exfiltration [MITRE T1071.004]",
+      "enabled": true
+    },
+    {
+      "ruleId": "RULE-CMD-009",
+      "name": "WMI Administrative Command Line Execution",
+      "category": "PROCESS",
+      "severity": "INFO",
+      "description": "Detects wmic.exe executing administrative queries or remote code invocation [MITRE T1047]",
+      "enabled": true
+    },
+    {
+      "ruleId": "RULE-PROC-010",
+      "name": "Process Masquerading Path Mismatch",
+      "category": "PROCESS",
+      "severity": "CRITICAL",
+      "description": "Detects system binaries (ex: svchost.exe) executing outside System32 directory [MITRE T1036]",
+      "enabled": true
+    }
+  ]
+}
