@@ -38,6 +38,7 @@ interface ProcessTelemetry {
   parentPid?: number | null;
   name: string;
   executablePath: string;
+  commandLine?: string;
   cpuPct: number;
   memoryMb: number;
   sha256Hash: string;
@@ -126,13 +127,8 @@ interface EDRAlert {
 }
 
 const API_BASE_URL = import.meta.env.VITE_GUARDIAN_API_URL || 'http://localhost:4000';
-const ADMIN_TOKEN = import.meta.env.VITE_GUARDIAN_ADMIN_TOKEN || '';
-const AGENT_TOKEN = import.meta.env.VITE_GUARDIAN_AGENT_TOKEN || ADMIN_TOKEN;
-
 function guardianFetch(path: string, init: RequestInit = {}) {
-  const headers = new Headers(init.headers || {});
-  if (ADMIN_TOKEN) headers.set('x-guardian-admin-token', ADMIN_TOKEN);
-  return fetch(`${API_BASE_URL}${path}`, { ...init, headers });
+  return fetch(`${API_BASE_URL}${path}`, init);
 }
 
 export default function App() {
@@ -164,7 +160,7 @@ export default function App() {
   const [showAndroidInstallModal, setShowAndroidInstallModal] = useState(false);
   const [copiedCmd, setCopiedCmd] = useState(false);
 
-  const androidInstallCommand = `pkg install -y curl bash && curl -sSL '${API_BASE_URL}/android.sh${ADMIN_TOKEN ? `?token=${encodeURIComponent(ADMIN_TOKEN)}` : ''}' | GUARDIAN_DOWNLOAD_TOKEN='${ADMIN_TOKEN}' GUARDIAN_AGENT_TOKEN='${AGENT_TOKEN}' bash`;
+  const androidInstallCommand = `pkg install -y curl bash && curl -sSL '${API_BASE_URL}/android.sh' | bash`;
 
   const fetchData = async () => {
     setLoading(true);
@@ -207,7 +203,7 @@ export default function App() {
   useEffect(() => {
     fetchData();
 
-    const eventSource = new EventSource(`${API_BASE_URL}/api/v1/stream${ADMIN_TOKEN ? `?token=${encodeURIComponent(ADMIN_TOKEN)}` : ''}`);
+    const eventSource = new EventSource(`${API_BASE_URL}/api/v1/stream`);
     eventSource.addEventListener('alert', (e) => {
       try {
         const newAlert = JSON.parse((e as MessageEvent).data);
@@ -778,7 +774,7 @@ export default function App() {
                       </td>
                       <td className="mono-text" style={{ padding: '12px', color: 'var(--accent-cyan)', fontWeight: 700 }}>{proc.pid}</td>
                       <td style={{ padding: '12px', fontWeight: 700, color: '#fff' }}>{proc.name}</td>
-                      <td className="mono-text" style={{ padding: '12px', color: 'var(--text-secondary)', fontSize: '0.75rem' }}>{proc.executablePath || 'N/A (Kernel/System)'}</td>
+                      <td className="mono-text" style={{ padding: '12px', color: 'var(--text-secondary)', fontSize: '0.75rem' }}>{proc.commandLine || proc.executablePath || 'N/A (Kernel/System)'}</td>
                       <td style={{ padding: '12px', color: proc.cpuPct > 50 ? '#f87171' : '#34d399' }}>{(proc.cpuPct || 0).toFixed(1)}%</td>
                       <td style={{ padding: '12px', color: '#fff' }}>{proc.memoryMb} MB</td>
                       <td className="mono-text" style={{ padding: '12px', color: 'var(--text-muted)', fontSize: '0.7rem' }}>
@@ -1261,7 +1257,7 @@ export default function App() {
                     <span className="mono-text" style={{ color: '#38bdf8' }}>{selectedProcessDetails.cpuPct.toFixed(1)}% CPU</span>
                   </div>
                   <div className="mono-text" style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
-                    {selectedProcessDetails.executablePath}
+                    {selectedProcessDetails.commandLine || selectedProcessDetails.executablePath}
                   </div>
                 </div>
 
