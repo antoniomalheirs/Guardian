@@ -5,7 +5,7 @@
 # Instalação completa de dependências, agente de segurança e daemon em 1-clique.
 # ==============================================================================
 
-set -e
+set -Eeuo pipefail
 
 GREEN='\033[0;32m'
 CYAN='\033[0;36m'
@@ -21,15 +21,16 @@ echo -e "${NC}"
 
 # 1. Detectar Servidor Mestre (Extraído da URL de Download ou Argumento)
 DEFAULT_SERVER="${GUARDIAN_SERVER:-http://192.168.50.140:4000}"
-if [ -n "$1" ]; then
+if [ -n "${1:-}" ]; then
     SERVER_URL="$1"
 else
     SERVER_URL="$DEFAULT_SERVER"
 fi
+SERVER_URL="${SERVER_URL%/}"
 
 echo -e "${YELLOW}[1/6] Verificando ambiente de execução...${NC}"
 IS_TERMUX=false
-if [ -d "/data/data/com.termux" ] || [ -n "$TERMUX_VERSION" ]; then
+if [ -d "/data/data/com.termux" ] || [ -n "${TERMUX_VERSION:-}" ]; then
     IS_TERMUX=true
     echo -e "       ${GREEN}✓ Ambiente Termux Android detectado.${NC}"
 else
@@ -106,7 +107,7 @@ fi
 
 case "$1" in
     start)
-        if [ -f "$PID_FILE" ] && kill -0 $(cat "$PID_FILE") 2>/dev/null; then
+        if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
             echo "⚠️ Guardian Agente já está rodando (PID: $(cat $PID_FILE))."
         else
             echo "🚀 Iniciando Guardian Agente em segundo plano (Daemon)..."
@@ -138,7 +139,7 @@ case "$1" in
         echo "✅ Agente parado."
         ;;
     status)
-        if [ -f "$PID_FILE" ] && kill -0 $(cat "$PID_FILE") 2>/dev/null; then
+        if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
             echo "🟢 Guardian Agente está ATIVO (PID: $(cat $PID_FILE))."
         else
             echo "🔴 Guardian Agente está INATIVO."
@@ -162,7 +163,7 @@ EOF
 chmod +x "$CLI_BIN"
 
 # Copiar para $PREFIX/bin (pasta nativa de executáveis do Termux) para acesso global imediato
-if [ -d "$PREFIX/bin" ]; then
+if [ -n "${PREFIX:-}" ] && [ -d "$PREFIX/bin" ]; then
     cp "$CLI_BIN" "$PREFIX/bin/guardian" 2>/dev/null || true
     chmod +x "$PREFIX/bin/guardian" 2>/dev/null || true
 fi
