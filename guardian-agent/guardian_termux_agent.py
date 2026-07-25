@@ -23,7 +23,7 @@ import glob
 import subprocess
 import re
 
-VALID_AGENT_TOKEN = "GUARDIAN-SECRET-AGENT-KEY-v0.9"
+VALID_AGENT_TOKEN = os.environ.get("GUARDIAN_AGENT_TOKEN", "GUARDIAN-SECRET-AGENT-KEY-v0.9")
 
 _ROOT_PROBE_DONE = False
 _ROOT_AVAILABLE = False
@@ -175,6 +175,42 @@ def compute_sha256(filepath, max_bytes=1048576):
 
 _UID_PACKAGE_CACHE = {}
 _LAST_UID_CACHE_TIME = 0
+_PROCESS_IDENTITY_CACHE = {}
+_LAST_PROCESS_IDENTITY_CACHE_TIME = 0
+
+def _is_kernel_thread_name(name):
+    name = (name or '').strip()
+    return bool(name.startswith('[') and name.endswith(']'))
+
+def _clean_process_name(raw_name, exe_path='', package_name=None, uid=None):
+    """Return a stable, human-readable process label instead of bracket/argv noise."""
+    raw_name = (raw_name or '').strip().replace('\x00', ' ')
+    exe_path = (exe_path or '').strip()
+    if package_name and (package_name.startswith('com.') or raw_name.startswith('app_process')):
+        return package_name
+    if raw_name.startswith('{') and raw_name.endswith('}'):
+        raw_name = raw_name[1:-1].strip()
+    if '/' in raw_name and not raw_name.startswith('['):
+        raw_name = os.path.basename(raw_name.split()[0])
+    if _is_kernel_thread_name(raw_name):
+        inner = raw_name[1:-1].strip()
+        return f"Kernel thread: {inner}" if inner else "Kernel thread"
+    if raw_name in ('', '-', 'unknown') and exe_path:
+        return os.path.basename(exe_path.split()[0]) or raw_name
+    if raw_name.startswith('app_process') and uid is not None:
+        pkg = get_uid_package_map().get(uid)
+        if pkg:
+            return pkg
+    return raw_name or (f"uid-{uid}" if uid is not None else 'unknown')
+
+def _clean_executable_path(name, exe_path='', package_name=None):
+    if (package_name and package_name.startswith('com.')) or (name or '').startswith('com.'):
+        return f"Android package: {package_name or name}"
+    if _is_kernel_thread_name(name) or (name or '').startswith('Kernel thread:'):
+        return 'Kernel thread (no userspace executable)'
+    if exe_path and not exe_path.endswith('/exe'):
+        return exe_path
+    return exe_path or 'Restricted by OS permissions'
 
 def get_uid_package_map():
     """Build a mapping from Android UIDs (e.g. 10145) to Package Names (e.g. com.whatsapp)."""
@@ -183,7 +219,8 @@ def get_uid_package_map():
     if _UID_PACKAGE_CACHE and (now - _LAST_UID_CACHE_TIME < 60):
         return _UID_PACKAGE_CACHE
 
-    mapping = {0: 'root', 1000: 'system', 1001: 'telephony', 1002: 'bluetooth', 1023: 'media_rw'}
+    mapping = {0: 'root', 1000: 'system', 1001: 'telephony', 1002: 'bluetooth', 1023: 'media_rw',
+               1029: 'wifi', 1036: 'logd', 1041: 'audioserver', 1047: 'cameraserver', 1068: 'statsd'}
     try:
         if os.path.exists('/data/system/packages.list') and os.access('/data/system/packages.list', os.R_OK):
             with open('/data/system/packages.list', 'r') as f:
@@ -231,7 +268,7 @@ def _read_proc_status(pid_str):
     return info
 
 def _add_process(processes, seen_pids, seen_names, pid, name, exe_path='', parent_pid=None, memory_mb=None, uid=None):
-    """Normalize and append one process, avoiding helper noise and duplicate PIDs."""
+    """Normalize and append one process, preserving kernel threads with readable labels."""
     if not pid or pid in seen_pids or pid == os.getpid():
         return
     name = (name or '').strip()
@@ -249,6 +286,8 @@ def _add_process(processes, seen_pids, seen_names, pid, name, exe_path='', paren
         uid = status.get('uid')
     uid_map = get_uid_package_map()
     package_name = uid_map.get(uid) if uid is not None else None
+    if package_name and not package_name.startswith('com.') and not name.startswith('app_process'):
+        package_name = None
 
     if not exe_path:
         try:
@@ -267,7 +306,8 @@ def _add_process(processes, seen_pids, seen_names, pid, name, exe_path='', paren
     if memory_mb is None:
         memory_mb = get_proc_memory_mb(pid_str)
 
-    display_name = package_name if package_name and name.startswith('app_process') else name
+    display_name = _clean_process_name(name, exe_path, package_name, uid)
+    exe_path = _clean_executable_path(display_name, exe_path, package_name)
     seen_pids.add(pid)
     seen_names.add(display_name)
     processes.append({
@@ -277,7 +317,7 @@ def _add_process(processes, seen_pids, seen_names, pid, name, exe_path='', paren
         "executablePath": exe_path,
         "cpuPct": 0.0,
         "memoryMb": memory_mb or 0.0,
-        "sha256Hash": "ANDROID_PACKAGE" if (display_name.startswith('com.') or package_name) else compute_sha256(exe_path)
+        "sha256Hash": "ANDROID_PACKAGE" if (display_name.startswith('com.') or package_name) else ("KERNEL_THREAD" if display_name.startswith('Kernel thread:') else compute_sha256(exe_path))
     })
 
 def _parse_ps_table(output):
@@ -473,24 +513,35 @@ def get_real_processes():
                         exe_path = f'/proc/{pid_str}/exe'
 
                 memory_mb = get_proc_memory_mb(pid_str)
+                status = _read_proc_status(pid_str)
+                uid = status.get('uid')
+                package_name = get_uid_package_map().get(uid) if uid is not None else None
+                if package_name and not package_name.startswith('com.') and not name.startswith('app_process'):
+                    package_name = None
+                display_name = _clean_process_name(name, exe_path, package_name, uid)
+                exe_path = _clean_executable_path(display_name, exe_path, package_name)
                 seen_pids.add(pid)
-                seen_names.add(name)
+                seen_names.add(display_name)
 
                 processes.append({
                     "pid": pid,
-                    "parentPid": None,
-                    "name": name,
+                    "parentPid": status.get('ppid'),
+                    "name": display_name,
                     "executablePath": exe_path,
                     "cpuPct": 0.0,
                     "memoryMb": memory_mb,
-                    "sha256Hash": compute_sha256(exe_path) if memory_mb > 0 else "SYSTEM_PROTECTED"
+                    "sha256Hash": "ANDROID_PACKAGE" if (package_name or display_name.startswith('com.')) else ("KERNEL_THREAD" if display_name.startswith('Kernel thread:') else compute_sha256(exe_path))
                 })
     except Exception:
         pass
 
-    # Sort processes by Memory MB (descending)
+    # Sort processes by Memory MB (descending). Keep a full PID/UID identity cache
+    # so socket ownership can be enriched even for rows not shown in topProcesses.
+    global _PROCESS_IDENTITY_CACHE, _LAST_PROCESS_IDENTITY_CACHE_TIME
+    _PROCESS_IDENTITY_CACHE = {p['pid']: p for p in processes}
+    _LAST_PROCESS_IDENTITY_CACHE_TIME = time.time()
     processes.sort(key=lambda p: (p['memoryMb'], p['pid']), reverse=True)
-    return processes[:100], len(processes)
+    return processes[:300], len(processes)
 
 
 # ─── Network Sockets from /proc/net/{tcp,tcp6,udp,udp6} ─────────────────────
@@ -565,8 +616,9 @@ def _read_proc_net_file(filepath, protocol, root=False):
             if (local_ip in ('127.0.0.1', '0.0.0.0', '::1') and remote_ip in ('127.0.0.1', '0.0.0.0', '::1') and state != 'LISTEN'):
                 continue
 
-            # Resolve process name from UID map (e.g. com.whatsapp, com.android.chrome)
-            proc_name = uid_map.get(uid, f"uid-{uid}")
+            # Resolve process name from UID map (e.g. com.whatsapp, com.android.chrome).
+            # If Android hides ownership, use an explicit permission label instead of 'unknown'.
+            proc_name = uid_map.get(uid) or (f"uid-{uid}" if uid else 'Restricted by OS')
 
             sockets.append({
                 "pid": 0,  # Resolved via /proc/[pid]/fd below if possible
@@ -584,7 +636,7 @@ def _read_proc_net_file(filepath, protocol, root=False):
     return sockets
 
 def _resolve_socket_pids(sockets):
-    """Try to resolve PIDs for sockets by scanning /proc/[pid]/fd symlinks."""
+    """Try to resolve PIDs/names for sockets by scanning /proc/[pid]/fd symlinks."""
     inode_to_pid = {}
     try:
         for pid_str in os.listdir('/proc'):
@@ -620,7 +672,8 @@ def _resolve_socket_pids(sockets):
         if inode in inode_to_pid:
             pid = inode_to_pid[inode]
             sock['pid'] = pid
-            resolved = pid_name.get(pid)
+            cached = _PROCESS_IDENTITY_CACHE.get(pid)
+            resolved = (cached or {}).get('name') or pid_name.get(pid)
             if resolved:
                 sock['processName'] = resolved
         sock.pop('inode', None)
@@ -641,7 +694,7 @@ def _append_socket(sockets, seen_keys, protocol, local_ip, local_port, remote_ip
     seen_keys.add(key)
     sockets.append({
         "pid": pid or 0,
-        "processName": process_name or 'unknown',
+        "processName": process_name if process_name and process_name != 'unknown' else ('PID restricted' if not pid else f'pid-{pid}'),
         "protocol": protocol,
         "localAddress": local_ip,
         "localPort": local_port,
@@ -738,8 +791,16 @@ def get_real_sockets():
 
     # Sort sockets: ESTABLISHED first, then LISTEN, UDP, then others
     priority = {'ESTABLISHED': 0, 'SYN_SENT': 1, 'LISTEN': 2, 'UDP': 3}
-    all_sockets.sort(key=lambda s: priority.get(s['status'], 5))
-    return all_sockets[:120]
+    # Prefer resolved PID/package rows over UID-only duplicates for the same 5-tuple.
+    best = {}
+    for s in all_sockets:
+        key = (s.get('protocol'), s.get('localAddress'), s.get('localPort'), s.get('remoteAddress'), s.get('remotePort'), s.get('status'))
+        score = (1 if s.get('pid') else 0) + (1 if s.get('processName') not in ('unknown', 'PID restricted', 'Restricted by OS') else 0)
+        if key not in best or score > best[key][0]:
+            best[key] = (score, s)
+    all_sockets = [item[1] for item in best.values()]
+    all_sockets.sort(key=lambda s: (priority.get(s['status'], 5), s.get('processName', ''), s.get('localPort', 0)))
+    return all_sockets[:300]
 
 
 
@@ -1656,6 +1717,37 @@ def send_post_request(url, data):
         return response.read().decode('utf-8')
 
 
+# ─── Response Command Execution ─────────────────────────────────────────────
+
+def execute_response_commands(commands):
+    """Execute response commands queued by Guardian Core after a heartbeat."""
+    if not isinstance(commands, list):
+        return
+    for command in commands[:20]:
+        try:
+            cmd_type = command.get('type')
+            payload = command.get('payload') or {}
+            if cmd_type == 'KILL_PROCESS':
+                pid = int(payload.get('pid', 0))
+                if pid > 1 and pid != os.getpid():
+                    try:
+                        os.kill(pid, 9)
+                    except PermissionError:
+                        _run_command(['kill', '-9', str(pid)], timeout=2, root=True)
+                    print(f"[RESPONSE] Processo PID {pid} finalizado por comando do Core")
+            elif cmd_type == 'ISOLATE_NETWORK':
+                isolated = False
+                for isolate_cmd in (['svc', 'wifi', 'disable'], ['svc', 'data', 'disable']):
+                    if _run_command(isolate_cmd, timeout=3, root=is_root_available()) is not None:
+                        isolated = True
+                if isolated:
+                    print('[RESPONSE] Isolamento de rede aplicado via comandos do sistema')
+                else:
+                    print('[RESPONSE] Isolamento solicitado, mas o SO bloqueou sem privilégios/root')
+        except Exception as exc:
+            print(f"[WARN] Falha ao executar comando de resposta: {exc}")
+
+
 # ─── Main Agent Loop ────────────────────────────────────────────────────────
 
 def kill_old_agent_processes():
@@ -1784,6 +1876,10 @@ def main():
             }
 
             res = send_post_request(f"{server_url}/api/v1/agents/heartbeat", payload)
+            try:
+                execute_response_commands((json.loads(res) or {}).get('commands', []))
+            except Exception:
+                pass
             crit = len([f for f in security_findings if f['severity'] == 'CRITICAL'])
             high = len([f for f in security_findings if f['severity'] == 'HIGH'])
             print(f"[HEARTBEAT] CPU: {cpu_pct}% | RAM: {ram_pct}% | Disk: {disk_pct}% | "

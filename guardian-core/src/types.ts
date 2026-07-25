@@ -76,6 +76,13 @@ export interface SecurityFinding {
   mitreId: string;
 }
 
+export interface AgentCommand {
+  commandId: string;
+  type: 'KILL_PROCESS' | 'ISOLATE_NETWORK';
+  payload: Record<string, any>;
+  createdAt: string;
+}
+
 export interface TelemetryPayload {
   agentId: string;
   timestamp: string;
