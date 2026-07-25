@@ -90,6 +90,15 @@ function createTables(): Promise<void> {
       `);
 
       db.run(`
+        CREATE INDEX IF NOT EXISTS idx_process_agent_created ON process_telemetry(agent_id, created_at DESC)
+      `);
+      db.run(`
+        CREATE INDEX IF NOT EXISTS idx_network_agent_created ON network_telemetry(agent_id, created_at DESC)
+      `);
+      db.run(`
+        CREATE INDEX IF NOT EXISTS idx_file_agent_created ON file_telemetry(agent_id, created_at DESC)
+      `);
+      db.run(`
         CREATE TABLE IF NOT EXISTS alerts (
           alert_id TEXT PRIMARY KEY,
           agent_id TEXT NOT NULL,
@@ -102,8 +111,11 @@ function createTables(): Promise<void> {
           status TEXT NOT NULL
         )
       `, (err) => {
-        if (err) reject(err);
-        else resolve();
+        if (err) return reject(err);
+        db.run(`CREATE INDEX IF NOT EXISTS idx_alert_agent_timestamp ON alerts(agent_id, timestamp DESC)`, (idxErr) => {
+          if (idxErr) reject(idxErr);
+          else resolve();
+        });
       });
     });
   });
@@ -225,6 +237,10 @@ export async function loadDiscoveredDevicesFromDb(): Promise<DiscoveredDevice[]>
   });
 }
 
+function finalizeStatement(stmt: sqlite3.Statement): Promise<void> {
+  return new Promise((resolve, reject) => stmt.finalize((err) => err ? reject(err) : resolve()));
+}
+
 export async function saveTelemetryToDb(
   agentId: string,
   topProcesses: ProcessTelemetry[],
@@ -232,43 +248,51 @@ export async function saveTelemetryToDb(
   fileEvents: FileTelemetry[]
 ): Promise<void> {
   if (!db) return;
-  return new Promise((resolve) => {
-    db.serialize(() => {
-      if (topProcesses && topProcesses.length > 0) {
-        db.run(`DELETE FROM process_telemetry WHERE agent_id = ?`, [agentId]);
-        const pStmt = db.prepare(`
-          INSERT INTO process_telemetry (agent_id, pid, parent_pid, name, executable_path, cpu_pct, memory_mb, sha256_hash)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        `);
-        for (const p of topProcesses) {
-          pStmt.run(agentId, p.pid, p.parentPid || null, p.name, p.executablePath || '', p.cpuPct || 0, p.memoryMb || 0, p.sha256Hash || 'N/A');
-        }
-        pStmt.finalize();
-      }
 
-      if (networkConns && networkConns.length > 0) {
-        db.run(`DELETE FROM network_telemetry WHERE agent_id = ?`, [agentId]);
-        const nStmt = db.prepare(`
-          INSERT INTO network_telemetry (agent_id, pid, process_name, protocol, local_address, local_port, remote_address, remote_port, status)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `);
-        for (const n of networkConns) {
-          nStmt.run(agentId, n.pid || 0, n.processName || '', n.protocol || 'TCP', n.localAddress || '', n.localPort || 0, n.remoteAddress || '', n.remotePort || 0, n.status || 'ESTABLISHED');
+  await new Promise<void>((resolve, reject) => {
+    db.serialize(async () => {
+      try {
+        if (topProcesses && topProcesses.length > 0) {
+          db.run(`DELETE FROM process_telemetry WHERE agent_id = ?`, [agentId]);
+          const pStmt = db.prepare(`
+            INSERT INTO process_telemetry (agent_id, pid, parent_pid, name, executable_path, cpu_pct, memory_mb, sha256_hash)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          `);
+          for (const p of topProcesses) {
+            pStmt.run(agentId, p.pid, p.parentPid || null, p.name, p.executablePath || '', p.cpuPct || 0, p.memoryMb || 0, p.sha256Hash || 'N/A');
+          }
+          await finalizeStatement(pStmt);
         }
-        nStmt.finalize();
-      }
 
-      if (fileEvents && fileEvents.length > 0) {
-        const fStmt = db.prepare(`
-          INSERT INTO file_telemetry (agent_id, file_path, action, file_size_bytes, timestamp)
-          VALUES (?, ?, ?, ?, ?)
-        `);
-        for (const f of fileEvents) {
-          fStmt.run(agentId, f.filePath || '', f.action || 'MODIFIED', f.fileSizeBytes || 0, f.timestamp || new Date().toISOString());
+        if (networkConns && networkConns.length > 0) {
+          db.run(`DELETE FROM network_telemetry WHERE agent_id = ?`, [agentId]);
+          const nStmt = db.prepare(`
+            INSERT INTO network_telemetry (agent_id, pid, process_name, protocol, local_address, local_port, remote_address, remote_port, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `);
+          for (const n of networkConns) {
+            nStmt.run(agentId, n.pid || 0, n.processName || '', n.protocol || 'TCP', n.localAddress || '', n.localPort || 0, n.remoteAddress || '', n.remotePort || 0, n.status || 'ESTABLISHED');
+          }
+          await finalizeStatement(nStmt);
         }
-        fStmt.finalize();
+
+        if (fileEvents && fileEvents.length > 0) {
+          const fStmt = db.prepare(`
+            INSERT INTO file_telemetry (agent_id, file_path, action, file_size_bytes, timestamp)
+            VALUES (?, ?, ?, ?, ?)
+          `);
+          for (const f of fileEvents) {
+            fStmt.run(agentId, f.filePath || '', f.action || 'MODIFIED', f.fileSizeBytes || 0, f.timestamp || new Date().toISOString());
+          }
+          await finalizeStatement(fStmt);
+        }
+
+        db.run(`DELETE FROM file_telemetry WHERE created_at < datetime('now', '-30 days')`);
+        db.run(`DELETE FROM alerts WHERE timestamp < datetime('now', '-365 days') AND status != 'ACTIVE'`);
+        resolve();
+      } catch (err) {
+        reject(err);
       }
-      resolve();
     });
   });
 }

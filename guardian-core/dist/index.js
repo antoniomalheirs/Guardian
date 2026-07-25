@@ -19,6 +19,7 @@ const MAX_PROCESSES_PER_HEARTBEAT = Number(process.env.GUARDIAN_MAX_PROCESSES ||
 const MAX_CONNECTIONS_PER_HEARTBEAT = Number(process.env.GUARDIAN_MAX_CONNECTIONS || 500);
 const MAX_FILE_EVENTS_PER_HEARTBEAT = Number(process.env.GUARDIAN_MAX_FILE_EVENTS || 250);
 const ALERT_DEDUP_WINDOW_MS = Number(process.env.GUARDIAN_ALERT_DEDUP_WINDOW_MS || 5 * 60 * 1000);
+const ADMIN_API_TOKEN = process.env.GUARDIAN_ADMIN_TOKEN || '';
 const execAsync = (0, util_1.promisify)(child_process_1.exec);
 const isWindows = process.platform === 'win32';
 app.use((0, cors_1.default)());
@@ -31,6 +32,7 @@ let quarantineHistory = [];
 let discoveredDevices = [];
 let sseClients = [];
 const recentAlertKeys = new Map();
+const pendingCommands = new Map();
 // Deep Detection State Trackers
 const agentTelemetryHistory = new Map();
 let activeRules = [
@@ -283,6 +285,32 @@ function broadcastSSE(event, data) {
     });
 }
 // Security Token Authentication Middleware
+function verifyAdminToken(req, res, next) {
+    if (!ADMIN_API_TOKEN)
+        return next();
+    const token = req.headers['x-guardian-admin-token'] || req.headers['x-guardian-token'];
+    if (typeof token !== 'string' || token !== ADMIN_API_TOKEN) {
+        return res.status(401).json({ error: 'Unauthorized: invalid or missing admin token' });
+    }
+    next();
+}
+function queueAgentCommand(agentId, type, payload) {
+    const command = {
+        commandId: `cmd-${Date.now()}-${Math.floor(Math.random() * 9999)}`,
+        type,
+        payload,
+        createdAt: new Date().toISOString(),
+    };
+    const existing = pendingCommands.get(agentId) || [];
+    existing.push(command);
+    pendingCommands.set(agentId, existing.slice(-50));
+    return command;
+}
+function consumeAgentCommands(agentId) {
+    const commands = pendingCommands.get(agentId) || [];
+    pendingCommands.delete(agentId);
+    return commands;
+}
 function verifyAgentToken(req, res, next) {
     const token = req.headers['x-guardian-token'];
     if (typeof token !== 'string' || token !== VALID_AGENT_TOKEN) {
@@ -744,7 +772,7 @@ async function performDeepNetworkDiscovery(targetSubnet) {
     return discovered;
 }
 // POST /api/v1/network/scan (Deep Network Discovery Engine)
-app.post('/api/v1/network/scan', async (req, res) => {
+app.post('/api/v1/network/scan', verifyAdminToken, async (req, res) => {
     try {
         const detectedSubnets = getLocalSubnets();
         const requestedSubnet = req.body?.subnet;
@@ -990,7 +1018,7 @@ app.get('/api/v1/alerts', (_req, res) => {
     res.json(alertsHistory);
 });
 // POST /api/v1/rules/create
-app.post('/api/v1/rules/create', (req, res) => {
+app.post('/api/v1/rules/create', verifyAdminToken, (req, res) => {
     const newRule = req.body;
     if (!newRule.ruleId || !newRule.name || !['PROCESS', 'FILE', 'NETWORK', 'BEHAVIOR'].includes(newRule.category) || !['INFO', 'WARNING', 'HIGH', 'CRITICAL'].includes(newRule.severity)) {
         return res.status(400).json({ error: 'ruleId, name, valid category, and valid severity are required' });
@@ -1002,7 +1030,7 @@ app.post('/api/v1/rules/create', (req, res) => {
     res.status(201).json({ status: 'created', rule: newRule });
 });
 // DELETE /api/v1/agents/:agentId (Remove Agent from DB and Memory)
-app.delete('/api/v1/agents/:agentId', async (req, res) => {
+app.delete('/api/v1/agents/:agentId', verifyAdminToken, async (req, res) => {
     const { agentId } = req.params;
     console.log(`🗑️ Deleting agent ${agentId} from memory and SQL database...`);
     agents.delete(agentId);
@@ -1011,16 +1039,17 @@ app.delete('/api/v1/agents/:agentId', async (req, res) => {
     res.json({ status: 'deleted', agentId });
 });
 // POST /api/v1/response/kill
-app.post('/api/v1/response/kill', (req, res) => {
+app.post('/api/v1/response/kill', verifyAdminToken, (req, res) => {
     const { agentId, pid } = req.body;
     if (typeof agentId !== 'string' || !agents.has(agentId) || !Number.isInteger(Number(pid)) || Number(pid) <= 0) {
         return res.status(400).json({ error: 'Valid agentId and positive pid are required' });
     }
-    console.log(`☠️ Execution response kill sent for process PID ${pid} on agent ${agentId}`);
-    res.json({ status: 'sent', agentId, pid: Number(pid) });
+    const command = queueAgentCommand(agentId, 'KILL_PROCESS', { pid: Number(pid) });
+    console.log(`☠️ Queued kill response ${command.commandId} for process PID ${pid} on agent ${agentId}`);
+    res.json({ status: 'queued', agentId, command });
 });
 // POST /api/v1/response/isolate
-app.post('/api/v1/response/isolate', async (req, res) => {
+app.post('/api/v1/response/isolate', verifyAdminToken, async (req, res) => {
     const { agentId } = req.body;
     if (typeof agentId !== 'string') {
         return res.status(400).json({ error: 'Valid agentId is required' });
@@ -1033,8 +1062,9 @@ app.post('/api/v1/response/isolate', async (req, res) => {
     if (!agent) {
         return res.status(404).json({ error: 'Agent not found' });
     }
-    console.log(`🔒 Network isolation command sent to agent ${agentId}`);
-    res.json({ status: 'isolated', agentId });
+    const command = queueAgentCommand(agentId, 'ISOLATE_NETWORK', {});
+    console.log(`🔒 Queued network isolation command ${command.commandId} for agent ${agentId}`);
+    res.json({ status: 'queued', agentId, command });
 });
 // POST /api/v1/agents/register (Protected by verifyAgentToken & DEDUPLICATED BY HOSTNAME)
 app.post('/api/v1/agents/register', verifyAgentToken, async (req, res) => {
@@ -1110,7 +1140,7 @@ app.post('/api/v1/agents/heartbeat', verifyAgentToken, async (req, res) => {
     await (0, db_js_1.saveTelemetryToDb)(agent.agentId, agent.topProcesses || [], agent.networkConnections || [], agent.fileEvents || []);
     broadcastSSE('telemetry', { agentId: agent.agentId, hostname: agent.hostname });
     console.log(`📥 [HEARTBEAT & CORRELATION EVALUATED] ${agent.hostname} | CPU: ${payload.cpuUsagePct.toFixed(1)}% | Procs: ${(payload.topProcesses || []).length} | Net: ${(payload.networkConnections || []).length}`);
-    res.json({ status: 'acknowledged', nextHeartbeatIntervalSec: 30 });
+    res.json({ status: 'acknowledged', nextHeartbeatIntervalSec: 30, commands: consumeAgentCommands(agent.agentId) });
 });
 // Start DB Initialization & Server Listen & Deep Discovery on ALL physical subnets
 (0, db_js_1.initDatabase)().then(async () => {

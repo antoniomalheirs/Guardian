@@ -23,7 +23,7 @@ import glob
 import subprocess
 import re
 
-VALID_AGENT_TOKEN = "GUARDIAN-SECRET-AGENT-KEY-v0.9"
+VALID_AGENT_TOKEN = os.environ.get("GUARDIAN_AGENT_TOKEN", "GUARDIAN-SECRET-AGENT-KEY-v0.9")
 
 _ROOT_PROBE_DONE = False
 _ROOT_AVAILABLE = False
@@ -1717,6 +1717,37 @@ def send_post_request(url, data):
         return response.read().decode('utf-8')
 
 
+# ─── Response Command Execution ─────────────────────────────────────────────
+
+def execute_response_commands(commands):
+    """Execute response commands queued by Guardian Core after a heartbeat."""
+    if not isinstance(commands, list):
+        return
+    for command in commands[:20]:
+        try:
+            cmd_type = command.get('type')
+            payload = command.get('payload') or {}
+            if cmd_type == 'KILL_PROCESS':
+                pid = int(payload.get('pid', 0))
+                if pid > 1 and pid != os.getpid():
+                    try:
+                        os.kill(pid, 9)
+                    except PermissionError:
+                        _run_command(['kill', '-9', str(pid)], timeout=2, root=True)
+                    print(f"[RESPONSE] Processo PID {pid} finalizado por comando do Core")
+            elif cmd_type == 'ISOLATE_NETWORK':
+                isolated = False
+                for isolate_cmd in (['svc', 'wifi', 'disable'], ['svc', 'data', 'disable']):
+                    if _run_command(isolate_cmd, timeout=3, root=is_root_available()) is not None:
+                        isolated = True
+                if isolated:
+                    print('[RESPONSE] Isolamento de rede aplicado via comandos do sistema')
+                else:
+                    print('[RESPONSE] Isolamento solicitado, mas o SO bloqueou sem privilégios/root')
+        except Exception as exc:
+            print(f"[WARN] Falha ao executar comando de resposta: {exc}")
+
+
 # ─── Main Agent Loop ────────────────────────────────────────────────────────
 
 def kill_old_agent_processes():
@@ -1845,6 +1876,10 @@ def main():
             }
 
             res = send_post_request(f"{server_url}/api/v1/agents/heartbeat", payload)
+            try:
+                execute_response_commands((json.loads(res) or {}).get('commands', []))
+            except Exception:
+                pass
             crit = len([f for f in security_findings if f['severity'] == 'CRITICAL'])
             high = len([f for f in security_findings if f['severity'] == 'HIGH'])
             print(f"[HEARTBEAT] CPU: {cpu_pct}% | RAM: {ram_pct}% | Disk: {disk_pct}% | "
