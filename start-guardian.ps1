@@ -6,6 +6,8 @@
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 Set-Location $ScriptDir
+$ApiPort = if ($env:GUARDIAN_API_PORT) { $env:GUARDIAN_API_PORT } else { "4000" }
+$ConsolePort = if ($env:GUARDIAN_CONSOLE_PORT) { $env:GUARDIAN_CONSOLE_PORT } else { "4001" }
 
 # 0. Detect Dynamic Host IP Address
 $LocalIP = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object {
@@ -17,6 +19,7 @@ $LocalIP = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object {
 } | Select-Object -First 1).IPAddress
 
 if (-not $LocalIP) { $LocalIP = "localhost" }
+$ServerUrl = if ($env:GUARDIAN_SERVER_URL) { $env:GUARDIAN_SERVER_URL.TrimEnd("/") } else { "http://${LocalIP}:${ApiPort}" }
 
 Write-Host ""
 Write-Host "======================================================================" -ForegroundColor Cyan
@@ -83,9 +86,12 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # 4. Iniciar Servidor Mestre e Dashboard Web
-Write-Host "[4/5] Subindo Servidor API (Porta 4000) e Dashboard Console (Porta 4001)..." -ForegroundColor Yellow
+Write-Host "[4/5] Subindo Servidor API (Porta $ApiPort) e Dashboard Console (Porta $ConsolePort)..." -ForegroundColor Yellow
+$PreviousPort = $env:PORT
+$env:PORT = $ApiPort
 Start-Process node -ArgumentList "`"$ScriptDir\guardian-core\dist\index.js`"" -WorkingDirectory "$ScriptDir\guardian-core" -WindowStyle Hidden
-Start-Process cmd.exe -ArgumentList "/c", "npm", "--prefix", "`"$ScriptDir\guardian-console`"", "run", "dev" -WorkingDirectory "$ScriptDir\guardian-console" -WindowStyle Hidden
+$env:PORT = $PreviousPort
+Start-Process cmd.exe -ArgumentList "/c", "npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", $ConsolePort -WorkingDirectory "$ScriptDir\guardian-console" -WindowStyle Hidden
 
 # 5. Iniciar Agente EDR Local (Rust Agent para Windows)
 Write-Host "[5/5] Iniciando Agente EDR Local (Rust Windows Agent)..." -ForegroundColor Yellow
@@ -93,10 +99,10 @@ $ReleaseAgent = "$ScriptDir\guardian-agent\target\release\guardian-agent.exe"
 $DebugAgent = "$ScriptDir\guardian-agent\target\debug\guardian-agent.exe"
 
 if (Test-Path $ReleaseAgent) {
-    Start-Process $ReleaseAgent -WorkingDirectory "$ScriptDir\guardian-agent" -WindowStyle Hidden
+    Start-Process $ReleaseAgent -ArgumentList "`"$ServerUrl`"" -WorkingDirectory "$ScriptDir\guardian-agent" -WindowStyle Hidden
     Write-Host "       Agente EDR Windows (Release) iniciado." -ForegroundColor Green
 } elseif (Test-Path $DebugAgent) {
-    Start-Process $DebugAgent -WorkingDirectory "$ScriptDir\guardian-agent" -WindowStyle Hidden
+    Start-Process $DebugAgent -ArgumentList "`"$ServerUrl`"" -WorkingDirectory "$ScriptDir\guardian-agent" -WindowStyle Hidden
     Write-Host "       Agente EDR Windows (Debug) iniciado." -ForegroundColor Green
 } else {
     Write-Host "       [INFO] Agente Rust Windows não compilado. Para ativar: cd guardian-agent; cargo build --release" -ForegroundColor Yellow
@@ -109,7 +115,7 @@ $retries = 0
 $healthy = $false
 while ($retries -lt 12) {
     try {
-        $res = Invoke-WebRequest -Uri "http://localhost:4000/api/v1/health" -TimeoutSec 2 -ErrorAction Stop
+        $res = Invoke-WebRequest -Uri "http://localhost:$ApiPort/api/v1/health" -TimeoutSec 2 -ErrorAction Stop
         if ($res.StatusCode -eq 200) {
             $healthy = $true
             break
@@ -121,13 +127,13 @@ while ($retries -lt 12) {
 }
 
 if ($healthy) {
-    Write-Host "       Servidor API respondendo com sucesso na porta 4000!" -ForegroundColor Green
+    Write-Host "       Servidor API respondendo com sucesso na porta $ApiPort!" -ForegroundColor Green
 } else {
     Write-Host "       [AVISO] Servidor ainda está inicializando..." -ForegroundColor Yellow
 }
 
 # Abrir o Dashboard no Navegador Padrão
-Start-Process "http://localhost:4001"
+Start-Process "http://localhost:$ConsolePort"
 
 $dbPath = "$ScriptDir\guardian-core\guardian.db"
 
@@ -135,12 +141,12 @@ Write-Host ""
 Write-Host "======================================================================" -ForegroundColor Green
 Write-Host " ✅ SISTEMA MESTRE GUARDIAN EDR & NDR ATIVADO E RODANDO!" -ForegroundColor Green
 Write-Host "======================================================================" -ForegroundColor Green
-Write-Host " 🌐 Dashboard Web:         http://localhost:4001" -ForegroundColor Cyan
-Write-Host " 🌐 Dashboard Rede Local:   http://${LocalIP}:4001" -ForegroundColor Cyan
-Write-Host " 🛡️ API Core Server:      http://${LocalIP}:4000" -ForegroundColor Cyan
+Write-Host " 🌐 Dashboard Web:         http://localhost:$ConsolePort" -ForegroundColor Cyan
+Write-Host " 🌐 Dashboard Rede Local:   http://${LocalIP}:$ConsolePort" -ForegroundColor Cyan
+Write-Host " 🛡️ API Core Server:      $ServerUrl" -ForegroundColor Cyan
 Write-Host " 🗄️ Banco de Dados:        SQLite ($dbPath)" -ForegroundColor Cyan
 Write-Host "----------------------------------------------------------------------" -ForegroundColor DarkGray
 Write-Host " 📱 COMANDO DE INSTALAÇÃO AUTOMÁTICA NO ANDROID (TERMUX):" -ForegroundColor Yellow
-Write-Host "    pkg install -y curl bash && curl -sSL http://${LocalIP}:4000/android.sh | bash" -ForegroundColor White
+Write-Host "    pkg install -y curl bash && curl -sSL $ServerUrl/android.sh | bash" -ForegroundColor White
 Write-Host "======================================================================" -ForegroundColor Green
 Write-Host ""
