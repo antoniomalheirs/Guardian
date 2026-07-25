@@ -14,7 +14,11 @@ const util_1 = require("util");
 const db_js_1 = require("./db.js");
 const app = (0, express_1.default)();
 const PORT = process.env.PORT || 4000;
-const VALID_AGENT_TOKEN = 'GUARDIAN-SECRET-AGENT-KEY-v0.9';
+const VALID_AGENT_TOKEN = process.env.GUARDIAN_AGENT_TOKEN || 'GUARDIAN-SECRET-AGENT-KEY-v0.9';
+const MAX_PROCESSES_PER_HEARTBEAT = Number(process.env.GUARDIAN_MAX_PROCESSES || 500);
+const MAX_CONNECTIONS_PER_HEARTBEAT = Number(process.env.GUARDIAN_MAX_CONNECTIONS || 500);
+const MAX_FILE_EVENTS_PER_HEARTBEAT = Number(process.env.GUARDIAN_MAX_FILE_EVENTS || 250);
+const ALERT_DEDUP_WINDOW_MS = Number(process.env.GUARDIAN_ALERT_DEDUP_WINDOW_MS || 5 * 60 * 1000);
 const execAsync = (0, util_1.promisify)(child_process_1.exec);
 const isWindows = process.platform === 'win32';
 app.use((0, cors_1.default)());
@@ -26,6 +30,7 @@ let alertsHistory = [];
 let quarantineHistory = [];
 let discoveredDevices = [];
 let sseClients = [];
+const recentAlertKeys = new Map();
 // Deep Detection State Trackers
 const agentTelemetryHistory = new Map();
 let activeRules = [
@@ -280,11 +285,28 @@ function broadcastSSE(event, data) {
 // Security Token Authentication Middleware
 function verifyAgentToken(req, res, next) {
     const token = req.headers['x-guardian-token'];
-    if (!token || token !== VALID_AGENT_TOKEN) {
-        console.warn(`🔒 Unauthorized agent request blocked from IP ${req.ip}. Header: ${token}`);
+    if (typeof token !== 'string' || token !== VALID_AGENT_TOKEN) {
+        console.warn(`🔒 Unauthorized agent request blocked from IP ${req.ip}.`);
         return res.status(401).json({ error: 'Unauthorized: Invalid or missing x-guardian-token header' });
     }
     next();
+}
+function isRuleEnabled(ruleId) {
+    return activeRules.find((rule) => rule.ruleId === ruleId)?.enabled !== false;
+}
+function normalizeSubnetPrefix(value) {
+    if (typeof value !== 'string')
+        return null;
+    const trimmed = value.trim();
+    const parts = trimmed.split('.');
+    if (parts.length !== 3)
+        return null;
+    if (!parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) >= 0 && Number(part) <= 255))
+        return null;
+    return parts.map((part) => String(Number(part))).join('.');
+}
+function asArray(value, maxItems) {
+    return Array.isArray(value) ? value.slice(0, maxItems) : [];
 }
 function readField(source, camel, snake, fallback) {
     return (source?.[camel] ?? source?.[snake] ?? fallback);
@@ -302,6 +324,9 @@ function normalizeInventory(raw) {
     };
 }
 function normalizeTelemetry(raw) {
+    const topProcesses = asArray(readField(raw, 'topProcesses', 'top_processes', []), MAX_PROCESSES_PER_HEARTBEAT);
+    const networkConnections = asArray(readField(raw, 'networkConnections', 'network_connections', []), MAX_CONNECTIONS_PER_HEARTBEAT);
+    const fileEvents = asArray(readField(raw, 'fileEvents', 'file_events', []), MAX_FILE_EVENTS_PER_HEARTBEAT);
     return {
         agentId: readField(raw, 'agentId', 'agent_id', ''),
         timestamp: readField(raw, 'timestamp', 'timestamp', new Date().toISOString()),
@@ -310,10 +335,10 @@ function normalizeTelemetry(raw) {
         diskUsagePct: Number(readField(raw, 'diskUsagePct', 'disk_usage_pct', 0)),
         activeProcessesCount: Number(readField(raw, 'activeProcessesCount', 'active_processes_count', 0)),
         eventsCount: Number(readField(raw, 'eventsCount', 'events_count', 0)),
-        topProcesses: readField(raw, 'topProcesses', 'top_processes', []),
-        networkConnections: readField(raw, 'networkConnections', 'network_connections', []),
-        fileEvents: readField(raw, 'fileEvents', 'file_events', []),
-        securityFindings: readField(raw, 'securityFindings', 'security_findings', []),
+        topProcesses,
+        networkConnections,
+        fileEvents,
+        securityFindings: asArray(readField(raw, 'securityFindings', 'security_findings', []), 100),
     };
 }
 function runCommand(command, timeout = 10000) {
@@ -384,6 +409,18 @@ function generateAlertId() {
     return `alert-${Date.now()}-${Math.floor(Math.random() * 9999)}`;
 }
 async function fireAlert(agent, ruleId, ruleName, severity, details) {
+    if (!isRuleEnabled(ruleId))
+        return;
+    const now = Date.now();
+    const alertKey = `${agent.agentId}:${ruleId}:${details}`;
+    const previous = recentAlertKeys.get(alertKey) || 0;
+    if (now - previous < ALERT_DEDUP_WINDOW_MS)
+        return;
+    recentAlertKeys.set(alertKey, now);
+    for (const [key, ts] of recentAlertKeys) {
+        if (now - ts > ALERT_DEDUP_WINDOW_MS)
+            recentAlertKeys.delete(key);
+    }
     const alert = {
         alertId: generateAlertId(),
         agentId: agent.agentId,
@@ -710,7 +747,12 @@ async function performDeepNetworkDiscovery(targetSubnet) {
 app.post('/api/v1/network/scan', async (req, res) => {
     try {
         const detectedSubnets = getLocalSubnets();
-        const targetSubnet = req.body.subnet || detectedSubnets[0] || '192.168.50';
+        const requestedSubnet = req.body?.subnet;
+        const normalizedSubnet = requestedSubnet === undefined ? null : normalizeSubnetPrefix(requestedSubnet);
+        if (requestedSubnet !== undefined && !normalizedSubnet) {
+            return res.status(400).json({ error: 'Invalid subnet. Use a /24 prefix like 192.168.50' });
+        }
+        const targetSubnet = normalizedSubnet || detectedSubnets[0] || '192.168.50';
         const devices = await performDeepNetworkDiscovery(targetSubnet);
         res.json({
             scanId: `scan-${Date.now()}`,
@@ -950,10 +992,13 @@ app.get('/api/v1/alerts', (_req, res) => {
 // POST /api/v1/rules/create
 app.post('/api/v1/rules/create', (req, res) => {
     const newRule = req.body;
-    if (!newRule.ruleId || !newRule.name) {
-        return res.status(400).json({ error: 'ruleId and name are required' });
+    if (!newRule.ruleId || !newRule.name || !['PROCESS', 'FILE', 'NETWORK', 'BEHAVIOR'].includes(newRule.category) || !['INFO', 'WARNING', 'HIGH', 'CRITICAL'].includes(newRule.severity)) {
+        return res.status(400).json({ error: 'ruleId, name, valid category, and valid severity are required' });
     }
-    activeRules.unshift(newRule);
+    if (activeRules.some((rule) => rule.ruleId === newRule.ruleId)) {
+        return res.status(409).json({ error: `Rule ${newRule.ruleId} already exists` });
+    }
+    activeRules.unshift({ ...newRule, enabled: newRule.enabled !== false });
     res.status(201).json({ status: 'created', rule: newRule });
 });
 // DELETE /api/v1/agents/:agentId (Remove Agent from DB and Memory)
@@ -968,16 +1013,25 @@ app.delete('/api/v1/agents/:agentId', async (req, res) => {
 // POST /api/v1/response/kill
 app.post('/api/v1/response/kill', (req, res) => {
     const { agentId, pid } = req.body;
+    if (typeof agentId !== 'string' || !agents.has(agentId) || !Number.isInteger(Number(pid)) || Number(pid) <= 0) {
+        return res.status(400).json({ error: 'Valid agentId and positive pid are required' });
+    }
     console.log(`☠️ Execution response kill sent for process PID ${pid} on agent ${agentId}`);
-    res.json({ status: 'sent', agentId, pid });
+    res.json({ status: 'sent', agentId, pid: Number(pid) });
 });
 // POST /api/v1/response/isolate
 app.post('/api/v1/response/isolate', async (req, res) => {
     const { agentId } = req.body;
+    if (typeof agentId !== 'string') {
+        return res.status(400).json({ error: 'Valid agentId is required' });
+    }
     const agent = agents.get(agentId);
     if (agent) {
         agent.status = 'isolated';
         await (0, db_js_1.saveAgentToDb)(agent);
+    }
+    if (!agent) {
+        return res.status(404).json({ error: 'Agent not found' });
     }
     console.log(`🔒 Network isolation command sent to agent ${agentId}`);
     res.json({ status: 'isolated', agentId });
@@ -1020,6 +1074,9 @@ app.post('/api/v1/agents/register', verifyAgentToken, async (req, res) => {
 // POST /api/v1/agents/heartbeat (Protected by verifyAgentToken & EVALUATES MITRE ATT&CK RULES)
 app.post('/api/v1/agents/heartbeat', verifyAgentToken, async (req, res) => {
     const payload = normalizeTelemetry(req.body);
+    if (!payload.agentId || typeof payload.agentId !== 'string') {
+        return res.status(400).json({ error: 'agentId is required' });
+    }
     let agent = agents.get(payload.agentId);
     if (!agent) {
         for (const a of agents.values()) {
