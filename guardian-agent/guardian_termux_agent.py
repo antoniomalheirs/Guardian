@@ -25,6 +25,53 @@ import re
 
 VALID_AGENT_TOKEN = "GUARDIAN-SECRET-AGENT-KEY-v0.9"
 
+_ROOT_PROBE_DONE = False
+_ROOT_AVAILABLE = False
+
+def is_root_available():
+    """Return True when Termux can execute commands through su -c."""
+    global _ROOT_PROBE_DONE, _ROOT_AVAILABLE
+    if _ROOT_PROBE_DONE:
+        return _ROOT_AVAILABLE
+    _ROOT_PROBE_DONE = True
+    try:
+        res = subprocess.run(['su', '-c', 'id -u'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=3)
+        _ROOT_AVAILABLE = res.returncode == 0 and res.stdout.strip() == '0'
+    except Exception:
+        _ROOT_AVAILABLE = False
+    return _ROOT_AVAILABLE
+
+def _run_command(cmd, timeout=4, root=False):
+    """Run a command normally or through su -c when root telemetry is available."""
+    try:
+        if root:
+            if not is_root_available():
+                return None
+            command_text = ' '.join(shlex_quote(str(part)) for part in cmd)
+            final_cmd = ['su', '-c', command_text]
+        else:
+            final_cmd = cmd
+        res = subprocess.run(final_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout)
+        if res.returncode == 0 and res.stdout:
+            return res.stdout
+    except Exception:
+        pass
+    return None
+
+def shlex_quote(value):
+    """Small POSIX shell quote helper to avoid an extra import on old Termux Python builds."""
+    return "'" + value.replace("'", "'\"'\"'") + "'"
+
+def _read_file_text(pathname, root=False, timeout=4):
+    """Read a file directly, or via su cat for rooted Android telemetry."""
+    if root:
+        return _run_command(['cat', pathname], timeout=timeout, root=True) or ''
+    try:
+        with open(pathname, 'r') as f:
+            return f.read()
+    except Exception:
+        return ''
+
 # ─── CPU Usage (Delta /proc/stat) ───────────────────────────────────────────
 
 _prev_cpu_idle = 0
@@ -164,6 +211,102 @@ def get_uid_package_map():
     return mapping
 
 
+
+def _read_proc_status(pid_str):
+    """Read PPID/UID from /proc/[pid]/status when Android permissions allow it."""
+    info = {"ppid": None, "uid": None}
+    try:
+        with open(f'/proc/{pid_str}/status', 'r') as f:
+            for line in f:
+                if line.startswith('PPid:'):
+                    parts = line.split()
+                    if len(parts) > 1 and parts[1].isdigit():
+                        info["ppid"] = int(parts[1])
+                elif line.startswith('Uid:'):
+                    parts = line.split()
+                    if len(parts) > 1 and parts[1].isdigit():
+                        info["uid"] = int(parts[1])
+    except Exception:
+        pass
+    return info
+
+def _add_process(processes, seen_pids, seen_names, pid, name, exe_path='', parent_pid=None, memory_mb=None, uid=None):
+    """Normalize and append one process, avoiding helper noise and duplicate PIDs."""
+    if not pid or pid in seen_pids or pid == os.getpid():
+        return
+    name = (name or '').strip()
+    exe_path = (exe_path or '').strip()
+    if not name and exe_path:
+        name = os.path.basename(exe_path.split()[0])
+    if not name or name in ('ps', 'sh', 'cat', 'stty', '-b', 'zombie') or name.startswith('pid-'):
+        return
+
+    pid_str = str(pid)
+    status = _read_proc_status(pid_str)
+    if parent_pid is None:
+        parent_pid = status.get('ppid')
+    if uid is None:
+        uid = status.get('uid')
+    uid_map = get_uid_package_map()
+    package_name = uid_map.get(uid) if uid is not None else None
+
+    if not exe_path:
+        try:
+            with open(f'/proc/{pid_str}/cmdline', 'rb') as f:
+                cmd = f.read(512).replace(b'\x00', b' ').decode('utf-8', errors='ignore').strip()
+                if cmd:
+                    exe_path = cmd.split()[0]
+        except Exception:
+            pass
+    if not exe_path:
+        try:
+            exe_path = os.readlink(f'/proc/{pid_str}/exe')
+        except Exception:
+            exe_path = f'/data/app/{name}' if name.startswith('com.') else f'/proc/{pid_str}/exe'
+
+    if memory_mb is None:
+        memory_mb = get_proc_memory_mb(pid_str)
+
+    display_name = package_name if package_name and name.startswith('app_process') else name
+    seen_pids.add(pid)
+    seen_names.add(display_name)
+    processes.append({
+        "pid": pid,
+        "parentPid": parent_pid,
+        "name": display_name,
+        "executablePath": exe_path,
+        "cpuPct": 0.0,
+        "memoryMb": memory_mb or 0.0,
+        "sha256Hash": "ANDROID_PACKAGE" if (display_name.startswith('com.') or package_name) else compute_sha256(exe_path)
+    })
+
+def _parse_ps_table(output):
+    """Parse Android toybox/toolbox ps output using its header positions."""
+    rows = []
+    lines = [line for line in output.splitlines() if line.strip()]
+    if len(lines) < 2:
+        return rows
+    header = lines[0].split()
+    upper = [h.upper() for h in header]
+    pid_idx = upper.index('PID') if 'PID' in upper else None
+    ppid_idx = upper.index('PPID') if 'PPID' in upper else None
+    name_idx = None
+    for candidate in ('NAME', 'CMD', 'COMMAND', 'ARGS'):
+        if candidate in upper:
+            name_idx = upper.index(candidate)
+            break
+    if pid_idx is None:
+        return rows
+    for line in lines[1:]:
+        parts = line.split(None, max(len(header) - 1, 1))
+        if len(parts) <= pid_idx or not parts[pid_idx].isdigit():
+            continue
+        pid = int(parts[pid_idx])
+        ppid = int(parts[ppid_idx]) if ppid_idx is not None and len(parts) > ppid_idx and parts[ppid_idx].isdigit() else None
+        name = parts[name_idx] if name_idx is not None and len(parts) > name_idx else parts[-1]
+        rows.append((pid, ppid, name))
+    return rows
+
 # ─── Real Memory Reader via /proc/[pid]/statm ────────────────────────────────
 
 def get_proc_memory_mb(pid_str):
@@ -266,34 +409,25 @@ def get_real_processes():
     except Exception:
         pass
 
-    # 3. System `ps -A` parser for active apps and services
-    try:
-        res = subprocess.run(['ps', '-A'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=3)
-        if res.returncode == 0 and res.stdout:
-            lines = res.stdout.splitlines()
-            for line in lines[1:]:
-                parts = line.split()
-                if len(parts) >= 8:
-                    pid_str = parts[1]
-                    name = parts[-1]
-                    if pid_str.isdigit():
-                        pid = int(pid_str)
-                        if pid not in seen_pids and pid != self_pid:
-                            if name.startswith('com.') or '/' in name or name in ('system_server', 'surfaceflinger', 'zygote', 'zygote64', 'audioserver'):
-                                seen_pids.add(pid)
-                                seen_names.add(name)
-                                mb = get_proc_memory_mb(pid_str)
-                                processes.append({
-                                    "pid": pid,
-                                    "parentPid": None,
-                                    "name": os.path.basename(name),
-                                    "executablePath": name if '/' in name else f"/system/bin/{name}",
-                                    "cpuPct": 0.0,
-                                    "memoryMb": mb,
-                                    "sha256Hash": "ANDROID_PACKAGE" if name.startswith("com.") else "SYSTEM_PROTECTED"
-                                })
-    except Exception:
-        pass
+    # 3. System `ps` parsers. Android toybox variants expose system/app
+    # processes even when /proc/[pid]/cmdline is hidden from Termux. Try explicit
+    # columns first, then fall back to the device default header.
+    root_enabled = is_root_available()
+    for ps_cmd in (
+        ['ps', '-A', '-o', 'PID,PPID,USER,NAME,ARGS'],
+        ['ps', '-A', '-o', 'PID,PPID,NAME,ARGS'],
+        ['ps', '-e', '-o', 'PID,PPID,NAME,ARGS'],
+        ['ps', '-A'],
+        ['ps'],
+    ):
+        for use_root in (False, root_enabled):
+            output = _run_command(ps_cmd, timeout=4, root=use_root)
+            if not output:
+                continue
+            for pid, ppid, name in _parse_ps_table(output):
+                if pid != self_pid:
+                    exe = name if '/' in name else f"/system/bin/{os.path.basename(name)}"
+                    _add_process(processes, seen_pids, seen_names, pid, os.path.basename(name), exe, ppid)
 
     # 4. Enumerate /proc/[pid] reading /proc/[pid]/comm for local Linux/Termux processes
     try:
@@ -401,17 +535,19 @@ _TCP_STATES = {
     '0A': 'LISTEN', '0B': 'CLOSING'
 }
 
-def _read_proc_net_file(filepath, protocol):
+def _read_proc_net_file(filepath, protocol, root=False):
     """Parse a /proc/net/{tcp,udp} file into structured socket records."""
     sockets = []
     uid_map = get_uid_package_map()
 
     try:
-        if not os.path.exists(filepath):
+        if not os.path.exists(filepath) and not root:
             return sockets
-            
-        with open(filepath, 'r') as f:
-            lines = f.readlines()[1:]  # skip header
+
+        content = _read_file_text(filepath, root=root)
+        if not content:
+            return sockets
+        lines = content.splitlines()[1:]  # skip header
 
         for line in lines:
             parts = line.strip().split()
@@ -490,20 +626,120 @@ def _resolve_socket_pids(sockets):
         sock.pop('inode', None)
 
 
+
+def _append_socket(sockets, seen_keys, protocol, local_ip, local_port, remote_ip, remote_port, status, process_name='unknown', pid=0):
+    try:
+        local_port = int(local_port)
+        remote_port = int(remote_port)
+    except Exception:
+        return
+    if local_ip in ('127.0.0.1', '::1') and remote_ip in ('127.0.0.1', '::1', '0.0.0.0', '*') and status != 'LISTEN':
+        return
+    key = (protocol, local_ip, local_port, remote_ip, remote_port, status, pid or 0)
+    if key in seen_keys:
+        return
+    seen_keys.add(key)
+    sockets.append({
+        "pid": pid or 0,
+        "processName": process_name or 'unknown',
+        "protocol": protocol,
+        "localAddress": local_ip,
+        "localPort": local_port,
+        "remoteAddress": remote_ip,
+        "remotePort": remote_port,
+        "status": status
+    })
+
+def _split_addr_port(value):
+    value = value.strip()
+    if value in ('*', '*:*'):
+        return '0.0.0.0', 0
+    if value.startswith('[') and ']:' in value:
+        host, port = value.rsplit(']:', 1)
+        return host[1:], int(port) if port.isdigit() else 0
+    if ':' in value:
+        host, port = value.rsplit(':', 1)
+        if port == '*':
+            port = '0'
+        return host or '0.0.0.0', int(port) if port.isdigit() else 0
+    return value, 0
+
+def _read_command_sockets():
+    """Collect sockets via Android toybox ss/netstat when /proc/net is scoped."""
+    sockets = []
+    seen = set()
+    root_enabled = is_root_available()
+    commands = (
+        ['ss', '-H', '-tunap'],
+        ['ss', '-H', '-tunp'],
+        ['netstat', '-tunp'],
+        ['netstat', '-tun'],
+    )
+    for cmd in commands:
+        for use_root in (False, root_enabled):
+            output = _run_command(cmd, timeout=4, root=use_root)
+            if not output:
+                continue
+            for line in output.splitlines():
+                parts = line.split()
+                if len(parts) < 5 or parts[0].lower().startswith(('proto', 'netid')):
+                    continue
+                proto_token = parts[0].upper()
+                protocol = 'UDP' if 'UDP' in proto_token else 'TCP' if 'TCP' in proto_token else proto_token
+                status = 'UNKNOWN'
+                if protocol.startswith('TCP') and parts[1].upper() not in ('0', 'LISTEN'):
+                    status = parts[1].upper().replace('-', '_')
+                elif protocol.startswith('UDP'):
+                    status = 'UDP'
+                # ss: Netid State Recv-Q Send-Q Local Peer Process
+                # netstat: Proto Recv-Q Send-Q Local Foreign State PID/Program
+                local_idx = 4 if cmd[0] == 'ss' else 3
+                peer_idx = 5 if cmd[0] == 'ss' else 4
+                if len(parts) <= peer_idx:
+                    continue
+                if cmd[0] == 'netstat' and protocol.startswith('TCP') and len(parts) > 5:
+                    status = parts[5].upper()
+                local_ip, local_port = _split_addr_port(parts[local_idx])
+                remote_ip, remote_port = _split_addr_port(parts[peer_idx])
+                proc = 'unknown'
+                pid = 0
+                tail = ' '.join(parts[peer_idx + 1:])
+                m = re.search(r'pid=(\d+),[^)]*?"([^"]+)"', tail)
+                if m:
+                    pid = int(m.group(1)); proc = m.group(2)
+                else:
+                    m = re.search(r'(\d+)/([^\s]+)', tail)
+                    if m:
+                        pid = int(m.group(1)); proc = m.group(2)
+                _append_socket(sockets, seen, protocol, local_ip, local_port, remote_ip, remote_port, status, proc, pid)
+    return sockets
+
 def get_real_sockets():
-    """Read ALL real network sockets from /proc/net/{tcp,tcp6,udp,udp6}."""
-    all_sockets = []
+    """Read network sockets using ss/netstat plus /proc/net fallbacks."""
+    all_sockets = _read_command_sockets()
+    seen = {
+        (s.get('protocol'), s.get('localAddress'), s.get('localPort'), s.get('remoteAddress'), s.get('remotePort'), s.get('status'), s.get('pid', 0))
+        for s in all_sockets
+    }
+
+    proc_sockets = []
     for fname, proto in [('/proc/net/tcp', 'TCP'), ('/proc/net/tcp6', 'TCP6'),
                          ('/proc/net/udp', 'UDP'), ('/proc/net/udp6', 'UDP6')]:
-        all_sockets.extend(_read_proc_net_file(fname, proto))
+        proc_sockets.extend(_read_proc_net_file(fname, proto, root=False))
+        if is_root_available():
+            proc_sockets.extend(_read_proc_net_file(fname, proto, root=True))
 
     # Resolve PIDs where permissions allow
-    _resolve_socket_pids(all_sockets)
+    _resolve_socket_pids(proc_sockets)
+    for sock in proc_sockets:
+        _append_socket(all_sockets, seen, sock.get('protocol'), sock.get('localAddress'), sock.get('localPort'),
+                       sock.get('remoteAddress'), sock.get('remotePort'), sock.get('status'),
+                       sock.get('processName'), sock.get('pid', 0))
 
-    # Sort sockets: ESTABLISHED first, then LISTEN, then others
-    priority = {'ESTABLISHED': 0, 'SYN_SENT': 1, 'LISTEN': 2}
+    # Sort sockets: ESTABLISHED first, then LISTEN, UDP, then others
+    priority = {'ESTABLISHED': 0, 'SYN_SENT': 1, 'LISTEN': 2, 'UDP': 3}
     all_sockets.sort(key=lambda s: priority.get(s['status'], 5))
-    return all_sockets[:60]
+    return all_sockets[:120]
 
 
 

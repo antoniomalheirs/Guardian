@@ -5,7 +5,7 @@
 # Instalação completa de dependências, agente de segurança e daemon em 1-clique.
 # ==============================================================================
 
-set -e
+set -Eeuo pipefail
 
 GREEN='\033[0;32m'
 CYAN='\033[0;36m'
@@ -21,15 +21,16 @@ echo -e "${NC}"
 
 # 1. Detectar Servidor Mestre (Extraído da URL de Download ou Argumento)
 DEFAULT_SERVER="${GUARDIAN_SERVER:-http://192.168.50.140:4000}"
-if [ -n "$1" ]; then
+if [ -n "${1:-}" ]; then
     SERVER_URL="$1"
 else
     SERVER_URL="$DEFAULT_SERVER"
 fi
+SERVER_URL="${SERVER_URL%/}"
 
 echo -e "${YELLOW}[1/6] Verificando ambiente de execução...${NC}"
 IS_TERMUX=false
-if [ -d "/data/data/com.termux" ] || [ -n "$TERMUX_VERSION" ]; then
+if [ -d "/data/data/com.termux" ] || [ -n "${TERMUX_VERSION:-}" ]; then
     IS_TERMUX=true
     echo -e "       ${GREEN}✓ Ambiente Termux Android detectado.${NC}"
 else
@@ -106,7 +107,7 @@ fi
 
 case "$1" in
     start)
-        if [ -f "$PID_FILE" ] && kill -0 $(cat "$PID_FILE") 2>/dev/null; then
+        if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
             echo "⚠️ Guardian Agente já está rodando (PID: $(cat $PID_FILE))."
         else
             echo "🚀 Iniciando Guardian Agente em segundo plano (Daemon)..."
@@ -117,6 +118,9 @@ case "$1" in
             if [ -z "$PYTHON_BIN" ]; then
                 echo "❌ Python não encontrado. Instale com: pkg install python"
                 exit 1
+            fi
+            if command -v su >/dev/null 2>&1 && su -c 'id -u' 2>/dev/null | grep -qx '0'; then
+                echo "🔓 Root detectado: o agente usará su -c para telemetria profunda de processos e sockets."
             fi
             nohup "$PYTHON_BIN" "$AGENT_FILE" "$SERVER_URL" > "$LOG_FILE" 2>&1 &
             echo $! > "$PID_FILE"
@@ -138,11 +142,34 @@ case "$1" in
         echo "✅ Agente parado."
         ;;
     status)
-        if [ -f "$PID_FILE" ] && kill -0 $(cat "$PID_FILE") 2>/dev/null; then
+        if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
             echo "🟢 Guardian Agente está ATIVO (PID: $(cat $PID_FILE))."
         else
             echo "🔴 Guardian Agente está INATIVO."
         fi
+        if command -v su >/dev/null 2>&1 && su -c 'id -u' 2>/dev/null | grep -qx '0'; then
+            echo "🔓 Root disponível: telemetria profunda habilitada."
+        else
+            echo "🔒 Root não disponível/autorizado: usando modo Android sem root."
+        fi
+        ;;
+    update)
+        if [ -z "$SERVER_URL" ]; then
+            echo "❌ URL do servidor não encontrada em $SERVER_FILE"
+            exit 1
+        fi
+        echo "⬇️ Baixando agente atualizado de $SERVER_URL/download/agent.py ..."
+        if command -v curl >/dev/null 2>&1; then
+            curl -sSL "$SERVER_URL/download/agent.py" -o "$AGENT_FILE"
+        elif command -v wget >/dev/null 2>&1; then
+            wget -q "$SERVER_URL/download/agent.py" -O "$AGENT_FILE"
+        else
+            echo "❌ curl/wget não encontrado."
+            exit 1
+        fi
+        chmod +x "$AGENT_FILE" 2>/dev/null || true
+        echo "✅ Agente atualizado. Reiniciando..."
+        $0 restart
         ;;
     log|logs)
         touch "$LOG_FILE"
@@ -154,7 +181,7 @@ case "$1" in
         $0 start
         ;;
     *)
-        echo "Uso: guardian {start|stop|restart|status|logs}"
+        echo "Uso: guardian {start|stop|restart|status|logs|update}"
         ;;
 esac
 EOF
@@ -162,7 +189,7 @@ EOF
 chmod +x "$CLI_BIN"
 
 # Copiar para $PREFIX/bin (pasta nativa de executáveis do Termux) para acesso global imediato
-if [ -d "$PREFIX/bin" ]; then
+if [ -n "${PREFIX:-}" ] && [ -d "$PREFIX/bin" ]; then
     cp "$CLI_BIN" "$PREFIX/bin/guardian" 2>/dev/null || true
     chmod +x "$PREFIX/bin/guardian" 2>/dev/null || true
 fi
