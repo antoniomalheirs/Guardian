@@ -35,6 +35,7 @@ get_local_ip() {
 
 
 load_or_create_secrets() {
+  local user_supplied_agent_token="${GUARDIAN_AGENT_TOKEN:-}"
   if [ -f "$SECRETS_FILE" ]; then
     set -a
     # shellcheck disable=SC1090
@@ -47,7 +48,10 @@ load_or_create_secrets() {
     GUARDIAN_ADMIN_TOKEN="$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))")"
     changed=true
   fi
-  if [ -z "${GUARDIAN_AGENT_TOKEN:-}" ]; then
+  if [ -z "$user_supplied_agent_token" ] && [ "${NODE_ENV:-}" != "production" ] && [ "${GUARDIAN_STRICT_AGENT_TOKEN:-false}" != "true" ]; then
+    # Compatibilidade: agentes já instalados usam o token padrão em laboratório/dev.
+    GUARDIAN_AGENT_TOKEN="${GUARDIAN_AGENT_TOKEN:-GUARDIAN-SECRET-AGENT-KEY-v0.9}"
+  elif [ -z "${GUARDIAN_AGENT_TOKEN:-}" ]; then
     GUARDIAN_AGENT_TOKEN="$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))")"
     changed=true
   fi

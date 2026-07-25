@@ -221,5 +221,6 @@ npm run build
 
 Notas de segurança:
 - Em `NODE_ENV=production`, o Core rejeita cadastro/heartbeat se o token padrão de agente não for trocado.
-- Endpoints administrativos, telemetria, alertas, regras, SSE e downloads de instaladores/agentes exigem `GUARDIAN_ADMIN_TOKEN` quando configurado; os scripts `start-guardian.*` geram e persistem tokens locais quando você não informar valores próprios.
+- Em laboratório/dev, os scripts preservam compatibilidade com agentes já instalados usando o token padrão; para rotação obrigatória, defina `GUARDIAN_AGENT_TOKEN` manualmente ou use `GUARDIAN_STRICT_AGENT_TOKEN=true`.
+- Endpoints administrativos, telemetria, alertas, regras, SSE e downloads de instaladores/agentes exigem `GUARDIAN_ADMIN_TOKEN` quando configurado; os scripts `start-guardian.*` geram e persistem token administrativo local quando você não informar valor próprio.
 - O limite padrão do payload JSON é `1mb`; ajuste com `GUARDIAN_JSON_LIMIT` apenas se houver necessidade operacional.

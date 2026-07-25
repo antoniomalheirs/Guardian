@@ -966,6 +966,7 @@ const handleInstallScriptDownload = (req: Request, res: Response) => {
     const serverUrl = `${protocol}://${host}`;
     scriptContent = scriptContent
       .replace(/\r\n?/g, '\n')
+      .replace(/__GUARDIAN_SERVER_URL__/g, serverUrl)
       .replace(/http:\/\/192\.168\.50\.140:4000/g, serverUrl);
 
     res.setHeader('Content-Type', 'text/x-shellscript; charset=utf-8');

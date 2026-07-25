@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 >nul
 title Guardian EDR ^& NDR Master System Launcher v12.0
 color 0A
 cls

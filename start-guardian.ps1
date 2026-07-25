@@ -4,6 +4,8 @@
 # Script de Inicialização Automática da Máquina Mestre e Subsistemas
 # ==============================================================================
 
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+$OutputEncoding = [Console]::OutputEncoding
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 Set-Location $ScriptDir
 $ApiPort = if ($env:GUARDIAN_API_PORT) { $env:GUARDIAN_API_PORT } else { "4000" }
@@ -18,6 +20,7 @@ function New-GuardianToken {
 }
 
 function Initialize-GuardianSecrets {
+    $userSuppliedAgentToken = $env:GUARDIAN_AGENT_TOKEN
     if (Test-Path $SecretsFile) {
         . $SecretsFile
     }
@@ -26,7 +29,10 @@ function Initialize-GuardianSecrets {
         $env:GUARDIAN_ADMIN_TOKEN = New-GuardianToken
         $changed = $true
     }
-    if (-not $env:GUARDIAN_AGENT_TOKEN) {
+    if (-not $userSuppliedAgentToken -and $env:NODE_ENV -ne "production" -and $env:GUARDIAN_STRICT_AGENT_TOKEN -ne "true") {
+        # Compatibilidade: agentes já instalados usam o token padrão em laboratório/dev.
+        if (-not $env:GUARDIAN_AGENT_TOKEN) { $env:GUARDIAN_AGENT_TOKEN = "GUARDIAN-SECRET-AGENT-KEY-v0.9" }
+    } elseif (-not $env:GUARDIAN_AGENT_TOKEN) {
         $env:GUARDIAN_AGENT_TOKEN = New-GuardianToken
         $changed = $true
     }
