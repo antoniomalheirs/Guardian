@@ -8,9 +8,9 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 Set-Location $ScriptDir
 
 # 0. Detect Dynamic Host IP Address
-$LocalIP = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { 
-    $_.InterfaceAlias -notlike "*Loopback*" -and 
-    $_.IPAddress -notlike "127.*" -and 
+$LocalIP = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object {
+    $_.InterfaceAlias -notlike "*Loopback*" -and
+    $_.IPAddress -notlike "127.*" -and
     $_.IPAddress -notlike "169.*" -and
     $_.IPAddress -notlike "172.17.*" -and
     $_.IPAddress -notlike "172.18.*"
@@ -29,11 +29,37 @@ Write-Host "[1/5] Encerrando instâncias Guardian anteriores em execução..." -
 Get-Process -Name "guardian-agent" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
 # Terminar subprocessos Node do guardian-core e vite
-Get-WmiObject Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue | Where-Object { 
+Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue | Where-Object {
     $_.CommandLine -like "*guardian-core*" -or $_.CommandLine -like "*guardian-console*"
 } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 
 Start-Sleep -Seconds 1
+
+# Validar dependências essenciais
+if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+    Write-Host "[ERRO CRÍTICO] Node.js não encontrado no PATH." -ForegroundColor Red
+    exit 1
+}
+if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
+    Write-Host "[ERRO CRÍTICO] npm não encontrado no PATH." -ForegroundColor Red
+    exit 1
+}
+
+# Instalar dependências quando node_modules ainda não existe
+foreach ($Project in @("guardian-core", "guardian-console")) {
+    $ProjectDir = Join-Path $ScriptDir $Project
+    if (-not (Test-Path (Join-Path $ProjectDir "node_modules"))) {
+        Write-Host "       Instalando dependências em $Project..." -ForegroundColor Yellow
+        Push-Location $ProjectDir
+        & npm ci
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "[ERRO CRÍTICO] Falha ao instalar dependências em $Project." -ForegroundColor Red
+            Pop-Location
+            exit 1
+        }
+        Pop-Location
+    }
+}
 
 # 2. Compilar Guardian Core API (TypeScript)
 Write-Host "[2/5] Compilando Guardian Core API (Backend TypeScript)..." -ForegroundColor Yellow
