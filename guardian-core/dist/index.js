@@ -782,7 +782,9 @@ const handleInstallScriptDownload = (req, res) => {
         const protocol = req.protocol || 'http';
         const host = req.headers.host || `localhost:${PORT}`;
         const serverUrl = `${protocol}://${host}`;
-        scriptContent = scriptContent.replace(/http:\/\/192\.168\.50\.140:4000/g, serverUrl);
+        scriptContent = scriptContent
+            .replace(/\r\n?/g, '\n')
+            .replace(/http:\/\/192\.168\.50\.140:4000/g, serverUrl);
         res.setHeader('Content-Type', 'text/x-shellscript; charset=utf-8');
         res.send(scriptContent);
     }
