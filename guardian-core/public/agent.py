@@ -164,6 +164,102 @@ def get_uid_package_map():
     return mapping
 
 
+
+def _read_proc_status(pid_str):
+    """Read PPID/UID from /proc/[pid]/status when Android permissions allow it."""
+    info = {"ppid": None, "uid": None}
+    try:
+        with open(f'/proc/{pid_str}/status', 'r') as f:
+            for line in f:
+                if line.startswith('PPid:'):
+                    parts = line.split()
+                    if len(parts) > 1 and parts[1].isdigit():
+                        info["ppid"] = int(parts[1])
+                elif line.startswith('Uid:'):
+                    parts = line.split()
+                    if len(parts) > 1 and parts[1].isdigit():
+                        info["uid"] = int(parts[1])
+    except Exception:
+        pass
+    return info
+
+def _add_process(processes, seen_pids, seen_names, pid, name, exe_path='', parent_pid=None, memory_mb=None, uid=None):
+    """Normalize and append one process, avoiding helper noise and duplicate PIDs."""
+    if not pid or pid in seen_pids or pid == os.getpid():
+        return
+    name = (name or '').strip()
+    exe_path = (exe_path or '').strip()
+    if not name and exe_path:
+        name = os.path.basename(exe_path.split()[0])
+    if not name or name in ('ps', 'sh', 'cat', 'stty', '-b', 'zombie') or name.startswith('pid-'):
+        return
+
+    pid_str = str(pid)
+    status = _read_proc_status(pid_str)
+    if parent_pid is None:
+        parent_pid = status.get('ppid')
+    if uid is None:
+        uid = status.get('uid')
+    uid_map = get_uid_package_map()
+    package_name = uid_map.get(uid) if uid is not None else None
+
+    if not exe_path:
+        try:
+            with open(f'/proc/{pid_str}/cmdline', 'rb') as f:
+                cmd = f.read(512).replace(b'\x00', b' ').decode('utf-8', errors='ignore').strip()
+                if cmd:
+                    exe_path = cmd.split()[0]
+        except Exception:
+            pass
+    if not exe_path:
+        try:
+            exe_path = os.readlink(f'/proc/{pid_str}/exe')
+        except Exception:
+            exe_path = f'/data/app/{name}' if name.startswith('com.') else f'/proc/{pid_str}/exe'
+
+    if memory_mb is None:
+        memory_mb = get_proc_memory_mb(pid_str)
+
+    display_name = package_name if package_name and name.startswith('app_process') else name
+    seen_pids.add(pid)
+    seen_names.add(display_name)
+    processes.append({
+        "pid": pid,
+        "parentPid": parent_pid,
+        "name": display_name,
+        "executablePath": exe_path,
+        "cpuPct": 0.0,
+        "memoryMb": memory_mb or 0.0,
+        "sha256Hash": "ANDROID_PACKAGE" if (display_name.startswith('com.') or package_name) else compute_sha256(exe_path)
+    })
+
+def _parse_ps_table(output):
+    """Parse Android toybox/toolbox ps output using its header positions."""
+    rows = []
+    lines = [line for line in output.splitlines() if line.strip()]
+    if len(lines) < 2:
+        return rows
+    header = lines[0].split()
+    upper = [h.upper() for h in header]
+    pid_idx = upper.index('PID') if 'PID' in upper else None
+    ppid_idx = upper.index('PPID') if 'PPID' in upper else None
+    name_idx = None
+    for candidate in ('NAME', 'CMD', 'COMMAND', 'ARGS'):
+        if candidate in upper:
+            name_idx = upper.index(candidate)
+            break
+    if pid_idx is None:
+        return rows
+    for line in lines[1:]:
+        parts = line.split(None, max(len(header) - 1, 1))
+        if len(parts) <= pid_idx or not parts[pid_idx].isdigit():
+            continue
+        pid = int(parts[pid_idx])
+        ppid = int(parts[ppid_idx]) if ppid_idx is not None and len(parts) > ppid_idx and parts[ppid_idx].isdigit() else None
+        name = parts[name_idx] if name_idx is not None and len(parts) > name_idx else parts[-1]
+        rows.append((pid, ppid, name))
+    return rows
+
 # ─── Real Memory Reader via /proc/[pid]/statm ────────────────────────────────
 
 def get_proc_memory_mb(pid_str):
@@ -266,34 +362,24 @@ def get_real_processes():
     except Exception:
         pass
 
-    # 3. System `ps -A` parser for active apps and services
-    try:
-        res = subprocess.run(['ps', '-A'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=3)
-        if res.returncode == 0 and res.stdout:
-            lines = res.stdout.splitlines()
-            for line in lines[1:]:
-                parts = line.split()
-                if len(parts) >= 8:
-                    pid_str = parts[1]
-                    name = parts[-1]
-                    if pid_str.isdigit():
-                        pid = int(pid_str)
-                        if pid not in seen_pids and pid != self_pid:
-                            if name.startswith('com.') or '/' in name or name in ('system_server', 'surfaceflinger', 'zygote', 'zygote64', 'audioserver'):
-                                seen_pids.add(pid)
-                                seen_names.add(name)
-                                mb = get_proc_memory_mb(pid_str)
-                                processes.append({
-                                    "pid": pid,
-                                    "parentPid": None,
-                                    "name": os.path.basename(name),
-                                    "executablePath": name if '/' in name else f"/system/bin/{name}",
-                                    "cpuPct": 0.0,
-                                    "memoryMb": mb,
-                                    "sha256Hash": "ANDROID_PACKAGE" if name.startswith("com.") else "SYSTEM_PROTECTED"
-                                })
-    except Exception:
-        pass
+    # 3. System `ps` parsers. Android toybox variants expose system/app
+    # processes even when /proc/[pid]/cmdline is hidden from Termux. Try explicit
+    # columns first, then fall back to the device default header.
+    for ps_cmd in (
+        ['ps', '-A', '-o', 'PID,PPID,NAME,ARGS'],
+        ['ps', '-e', '-o', 'PID,PPID,NAME,ARGS'],
+        ['ps', '-A'],
+        ['ps'],
+    ):
+        try:
+            res = subprocess.run(ps_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=3)
+            if res.returncode == 0 and res.stdout:
+                for pid, ppid, name in _parse_ps_table(res.stdout):
+                    if pid != self_pid:
+                        exe = name if '/' in name else f"/system/bin/{os.path.basename(name)}"
+                        _add_process(processes, seen_pids, seen_names, pid, os.path.basename(name), exe, ppid)
+        except Exception:
+            continue
 
     # 4. Enumerate /proc/[pid] reading /proc/[pid]/comm for local Linux/Termux processes
     try:
@@ -490,20 +576,119 @@ def _resolve_socket_pids(sockets):
         sock.pop('inode', None)
 
 
+
+def _append_socket(sockets, seen_keys, protocol, local_ip, local_port, remote_ip, remote_port, status, process_name='unknown', pid=0):
+    try:
+        local_port = int(local_port)
+        remote_port = int(remote_port)
+    except Exception:
+        return
+    if local_ip in ('127.0.0.1', '::1') and remote_ip in ('127.0.0.1', '::1', '0.0.0.0', '*') and status != 'LISTEN':
+        return
+    key = (protocol, local_ip, local_port, remote_ip, remote_port, status, pid or 0)
+    if key in seen_keys:
+        return
+    seen_keys.add(key)
+    sockets.append({
+        "pid": pid or 0,
+        "processName": process_name or 'unknown',
+        "protocol": protocol,
+        "localAddress": local_ip,
+        "localPort": local_port,
+        "remoteAddress": remote_ip,
+        "remotePort": remote_port,
+        "status": status
+    })
+
+def _split_addr_port(value):
+    value = value.strip()
+    if value in ('*', '*:*'):
+        return '0.0.0.0', 0
+    if value.startswith('[') and ']:' in value:
+        host, port = value.rsplit(']:', 1)
+        return host[1:], int(port) if port.isdigit() else 0
+    if ':' in value:
+        host, port = value.rsplit(':', 1)
+        if port == '*':
+            port = '0'
+        return host or '0.0.0.0', int(port) if port.isdigit() else 0
+    return value, 0
+
+def _read_command_sockets():
+    """Collect sockets via Android toybox ss/netstat when /proc/net is scoped."""
+    sockets = []
+    seen = set()
+    commands = (
+        ['ss', '-H', '-tunap'],
+        ['ss', '-H', '-tunp'],
+        ['netstat', '-tunp'],
+        ['netstat', '-tun'],
+    )
+    for cmd in commands:
+        try:
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=4)
+            if res.returncode != 0 or not res.stdout:
+                continue
+            for line in res.stdout.splitlines():
+                parts = line.split()
+                if len(parts) < 5 or parts[0].lower().startswith(('proto', 'netid')):
+                    continue
+                proto_token = parts[0].upper()
+                protocol = 'UDP' if 'UDP' in proto_token else 'TCP' if 'TCP' in proto_token else proto_token
+                status = 'UNKNOWN'
+                if protocol.startswith('TCP') and parts[1].upper() not in ('0', 'LISTEN'):
+                    status = parts[1].upper().replace('-', '_')
+                elif protocol.startswith('UDP'):
+                    status = 'UDP'
+                # ss: Netid State Recv-Q Send-Q Local Peer Process
+                # netstat: Proto Recv-Q Send-Q Local Foreign State PID/Program
+                local_idx = 4 if cmd[0] == 'ss' else 3
+                peer_idx = 5 if cmd[0] == 'ss' else 4
+                if len(parts) <= peer_idx:
+                    continue
+                if cmd[0] == 'netstat' and protocol.startswith('TCP') and len(parts) > 5:
+                    status = parts[5].upper()
+                local_ip, local_port = _split_addr_port(parts[local_idx])
+                remote_ip, remote_port = _split_addr_port(parts[peer_idx])
+                proc = 'unknown'
+                pid = 0
+                tail = ' '.join(parts[peer_idx + 1:])
+                m = re.search(r'pid=(\d+),[^)]*?"([^"]+)"', tail)
+                if m:
+                    pid = int(m.group(1)); proc = m.group(2)
+                else:
+                    m = re.search(r'(\d+)/([^\s]+)', tail)
+                    if m:
+                        pid = int(m.group(1)); proc = m.group(2)
+                _append_socket(sockets, seen, protocol, local_ip, local_port, remote_ip, remote_port, status, proc, pid)
+        except Exception:
+            continue
+    return sockets
+
 def get_real_sockets():
-    """Read ALL real network sockets from /proc/net/{tcp,tcp6,udp,udp6}."""
-    all_sockets = []
+    """Read network sockets using ss/netstat plus /proc/net fallbacks."""
+    all_sockets = _read_command_sockets()
+    seen = {
+        (s.get('protocol'), s.get('localAddress'), s.get('localPort'), s.get('remoteAddress'), s.get('remotePort'), s.get('status'), s.get('pid', 0))
+        for s in all_sockets
+    }
+
+    proc_sockets = []
     for fname, proto in [('/proc/net/tcp', 'TCP'), ('/proc/net/tcp6', 'TCP6'),
                          ('/proc/net/udp', 'UDP'), ('/proc/net/udp6', 'UDP6')]:
-        all_sockets.extend(_read_proc_net_file(fname, proto))
+        proc_sockets.extend(_read_proc_net_file(fname, proto))
 
     # Resolve PIDs where permissions allow
-    _resolve_socket_pids(all_sockets)
+    _resolve_socket_pids(proc_sockets)
+    for sock in proc_sockets:
+        _append_socket(all_sockets, seen, sock.get('protocol'), sock.get('localAddress'), sock.get('localPort'),
+                       sock.get('remoteAddress'), sock.get('remotePort'), sock.get('status'),
+                       sock.get('processName'), sock.get('pid', 0))
 
-    # Sort sockets: ESTABLISHED first, then LISTEN, then others
-    priority = {'ESTABLISHED': 0, 'SYN_SENT': 1, 'LISTEN': 2}
+    # Sort sockets: ESTABLISHED first, then LISTEN, UDP, then others
+    priority = {'ESTABLISHED': 0, 'SYN_SENT': 1, 'LISTEN': 2, 'UDP': 3}
     all_sockets.sort(key=lambda s: priority.get(s['status'], 5))
-    return all_sockets[:60]
+    return all_sockets[:120]
 
 
 
@@ -1131,6 +1316,252 @@ def detect_unlinked_memory_executables():
         pass
     return findings
 
+def detect_running_vpn():
+    """Detect if a VPN connection is active (tun0/ppp0 interfaces)."""
+    findings = []
+    try:
+        for iface in ['tun0', 'tun1', 'ppp0', 'ppp1']:
+            if os.path.exists(f'/sys/class/net/{iface}'):
+                findings.append({
+                    'findingType': 'VPN_ACTIVE',
+                    'severity': 'INFO',
+                    'description': f'Interface VPN ativa detectada: {iface}',
+                    'evidence': f'/sys/class/net/{iface} exists',
+                    'mitreId': 'T1572'
+                })
+    except Exception:
+        pass
+    return findings
+
+
+def detect_open_listening_ports():
+    """Detect all listening ports and flag dangerous ones."""
+    findings = []
+    dangerous_ports = {21: 'FTP', 23: 'Telnet', 25: 'SMTP', 445: 'SMB', 3389: 'RDP', 5555: 'ADB', 8080: 'HTTP-Proxy', 4444: 'Metasploit', 1337: 'Hacker', 6667: 'IRC-C2'}
+    try:
+        for proto_file in ['/proc/net/tcp', '/proc/net/tcp6']:
+            if not os.path.exists(proto_file):
+                continue
+            with open(proto_file, 'r') as f:
+                for line in f.readlines()[1:]:
+                    parts = line.strip().split()
+                    if len(parts) >= 4 and parts[3] == '0A':  # LISTEN state
+                        port_hex = parts[1].split(':')[1]
+                        port = int(port_hex, 16)
+                        if port in dangerous_ports:
+                            findings.append({
+                                'findingType': 'DANGEROUS_LISTENING_PORT',
+                                'severity': 'HIGH' if port in (4444, 1337, 6667, 5555) else 'WARNING',
+                                'description': f'Porta perigosa {port} ({dangerous_ports[port]}) em LISTEN',
+                                'evidence': f'Protocolo: {proto_file}, Porta: {port}',
+                                'mitreId': 'T1071'
+                            })
+    except Exception:
+        pass
+    return findings
+
+
+def detect_world_writable_executables():
+    """Detect world-writable executables in critical directories."""
+    findings = []
+    try:
+        critical_dirs = ['/system/bin', '/system/xbin', '/vendor/bin', '/data/local/tmp']
+        for d in critical_dirs:
+            if not os.path.isdir(d):
+                continue
+            try:
+                for f in os.listdir(d)[:50]:
+                    fpath = os.path.join(d, f)
+                    try:
+                        mode = os.stat(fpath).st_mode
+                        if mode & 0o002:  # world-writable
+                            findings.append({
+                                'findingType': 'WORLD_WRITABLE_EXEC',
+                                'severity': 'HIGH',
+                                'description': f'Executável com permissão de escrita global: {fpath}',
+                                'evidence': f'Mode: {oct(mode)}',
+                                'mitreId': 'T1222'
+                            })
+                    except Exception:
+                        continue
+            except PermissionError:
+                continue
+    except Exception:
+        pass
+    return findings
+
+
+def detect_battery_and_device_info():
+    """Collect device battery and temperature as telemetry info findings."""
+    findings = []
+    try:
+        bat_path = '/sys/class/power_supply/battery'
+        if os.path.exists(bat_path):
+            level = ''
+            status = ''
+            temp = ''
+            try:
+                with open(f'{bat_path}/capacity', 'r') as f:
+                    level = f.read().strip()
+            except Exception:
+                pass
+            try:
+                with open(f'{bat_path}/status', 'r') as f:
+                    status = f.read().strip()
+            except Exception:
+                pass
+            try:
+                with open(f'{bat_path}/temp', 'r') as f:
+                    raw = f.read().strip()
+                    temp = f"{int(raw) / 10.0}°C"
+            except Exception:
+                pass
+            if level and int(level) < 15:
+                findings.append({
+                    'findingType': 'LOW_BATTERY',
+                    'severity': 'WARNING',
+                    'description': f'Bateria baixa: {level}% ({status})',
+                    'evidence': f'Nível: {level}%, Status: {status}, Temp: {temp}',
+                    'mitreId': 'N/A'
+                })
+            findings.append({
+                'findingType': 'DEVICE_BATTERY_STATUS',
+                'severity': 'INFO',
+                'description': f'Bateria: {level}% | Status: {status} | Temp: {temp}',
+                'evidence': f'{bat_path}',
+                'mitreId': 'N/A'
+                })
+    except Exception:
+        pass
+    return findings
+
+
+def detect_developer_options():
+    """Detect if Android developer options and USB debugging are enabled."""
+    findings = []
+    try:
+        checks = [
+            ('adb_enabled', 'USB Debugging (ADB) está HABILITADO'),
+            ('development_settings_enabled', 'Opções de Desenvolvedor estão HABILITADAS'),
+            ('install_non_market_apps', 'Instalação de fontes desconhecidas HABILITADA'),
+        ]
+        for prop, desc in checks:
+            try:
+                res = subprocess.run(['settings', 'get', 'global', prop], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=2)
+                if res.returncode == 0 and res.stdout.strip() == '1':
+                    findings.append({
+                        'findingType': 'DEV_OPTIONS_ENABLED',
+                        'severity': 'WARNING' if 'ADB' in desc else 'INFO',
+                        'description': desc,
+                        'evidence': f'{prop} = 1',
+                        'mitreId': 'T1456'
+                    })
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return findings
+
+
+def detect_screen_lock_status():
+    """Check if screen lock is configured."""
+    findings = []
+    try:
+        res = subprocess.run(['settings', 'get', 'secure', 'lockscreen.password_type'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=2)
+        if res.returncode == 0:
+            val = res.stdout.strip()
+            if val in ('0', '65536', 'null', ''):
+                findings.append({
+                    'findingType': 'NO_SCREEN_LOCK',
+                    'severity': 'HIGH',
+                    'description': 'Dispositivo NÃO possui bloqueio de tela configurado!',
+                    'evidence': f'lockscreen.password_type = {val}',
+                    'mitreId': 'T1461'
+                })
+    except Exception:
+        pass
+    return findings
+
+
+def detect_installed_security_apps():
+    """Check for known security/antivirus apps installed."""
+    findings = []
+    security_apps = {
+        'com.lookout': 'Lookout Security',
+        'com.avast.android.mobilesecurity': 'Avast Antivirus',
+        'com.bitdefender.security': 'Bitdefender',
+        'com.kaspersky.security.cloud': 'Kaspersky',
+        'org.malwarebytes.antimalware': 'Malwarebytes',
+        'com.eset.ems2.gp': 'ESET Mobile Security',
+        'com.norton.engine': 'Norton Mobile',
+        'com.sophos.smsec': 'Sophos Mobile',
+    }
+    found = []
+    try:
+        res = subprocess.run(['pm', 'list', 'packages'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5)
+        if res.returncode == 0:
+            pkgs = res.stdout
+            for pkg, name in security_apps.items():
+                if pkg in pkgs:
+                    found.append(name)
+    except Exception:
+        pass
+
+    if found:
+        findings.append({
+            'findingType': 'SECURITY_APP_INSTALLED',
+            'severity': 'INFO',
+            'description': f'Apps de segurança instalados: {", ".join(found)}',
+            'evidence': ', '.join(found),
+            'mitreId': 'N/A'
+        })
+    else:
+        findings.append({
+            'findingType': 'NO_SECURITY_APP',
+            'severity': 'WARNING',
+            'description': 'Nenhum aplicativo de segurança/antivírus detectado no dispositivo',
+            'evidence': 'pm list packages não contém nenhum pacote de segurança conhecido',
+            'mitreId': 'T1629.003'
+        })
+    return findings
+
+
+def detect_active_wifi_info():
+    """Detect current Wi-Fi connection details."""
+    findings = []
+    try:
+        res = subprocess.run(['dumpsys', 'wifi'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=3)
+        if res.returncode == 0 and res.stdout:
+            ssid = ''
+            bssid = ''
+            freq = ''
+            for line in res.stdout.split('\n'):
+                l = line.strip()
+                if 'mWifiInfo' in l or 'SSID:' in l:
+                    m = re.search(r'SSID:\s*"?([^"\s,]+)', l)
+                    if m:
+                        ssid = m.group(1)
+                if 'BSSID:' in l:
+                    m = re.search(r'BSSID:\s*([0-9a-f:]+)', l, re.IGNORECASE)
+                    if m:
+                        bssid = m.group(1)
+                if 'Frequency:' in l:
+                    m = re.search(r'Frequency:\s*(\d+)', l)
+                    if m:
+                        freq = f"{m.group(1)}MHz"
+            if ssid:
+                findings.append({
+                    'findingType': 'WIFI_CONNECTION',
+                    'severity': 'INFO',
+                    'description': f'Conectado ao Wi-Fi: {ssid} ({bssid}) @ {freq}',
+                    'evidence': f'SSID={ssid}, BSSID={bssid}, Freq={freq}',
+                    'mitreId': 'N/A'
+                })
+    except Exception:
+        pass
+    return findings
+
+
 def collect_all_security_findings():
     """Run all deep security detection modules."""
     all_findings = []
@@ -1147,6 +1578,14 @@ def collect_all_security_findings():
     all_findings.extend(detect_promiscuous_interfaces())
     all_findings.extend(detect_global_process_tracers())
     all_findings.extend(detect_unlinked_memory_executables())
+    all_findings.extend(detect_running_vpn())
+    all_findings.extend(detect_open_listening_ports())
+    all_findings.extend(detect_world_writable_executables())
+    all_findings.extend(detect_battery_and_device_info())
+    all_findings.extend(detect_developer_options())
+    all_findings.extend(detect_screen_lock_status())
+    all_findings.extend(detect_installed_security_apps())
+    all_findings.extend(detect_active_wifi_info())
     return all_findings
 
 
@@ -1189,13 +1628,49 @@ def kill_old_agent_processes():
 
 def main():
     kill_old_agent_processes()
-    if len(sys.argv) > 1:
-        server_ip = sys.argv[1]
-    else:
+    config_dir = os.path.expanduser("~/.guardian")
+    os.makedirs(config_dir, exist_ok=True)
+    config_file = os.path.join(config_dir, "server_url.txt")
+
+    server_ip = None
+
+    # 1. Argumento da linha de comando
+    if len(sys.argv) > 1 and sys.argv[1].strip():
+        server_ip = sys.argv[1].strip()
+        try:
+            with open(config_file, "w") as f:
+                f.write(server_ip)
+        except Exception:
+            pass
+
+    # 2. Variável de ambiente
+    if not server_ip and os.environ.get("GUARDIAN_SERVER"):
+        server_ip = os.environ.get("GUARDIAN_SERVER").strip()
+
+    # 3. Arquivo de configuração persistente
+    if not server_ip and os.path.exists(config_file):
+        try:
+            with open(config_file, "r") as f:
+                server_ip = f.read().strip()
+        except Exception:
+            pass
+
+    # 4. Prompt interativo se stdin for um terminal real
+    if not server_ip and sys.stdin.isatty():
         try:
             server_ip = input("Digite o IP da maquina mestre (ex: 192.168.50.140): ").strip()
-        except EOFError:
-            server_ip = "127.0.0.1"
+            if server_ip:
+                try:
+                    with open(config_file, "w") as f:
+                        f.write(server_ip)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    # Fallback se nenhum IP for fornecido
+    if not server_ip:
+        server_ip = "192.168.50.140"
 
     if not server_ip.startswith("http"):
         server_url = f"http://{server_ip}:4000"
@@ -1266,7 +1741,7 @@ def main():
         except Exception as e:
             print(f"[WARN] Heartbeat falhou: {e}")
 
-        time.sleep(30)
+        time.sleep(20)
 
 if __name__ == "__main__":
     main()
