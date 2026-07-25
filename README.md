@@ -115,7 +115,8 @@ No Termux do telefone/tablet:
 
 ```bash
 pkg install -y curl bash
-curl -sSL http://IP_DA_MAQUINA_MESTRE:4000/android.sh | bash
+curl -sSL 'http://IP_DA_MAQUINA_MESTRE:4000/android.sh?token=TOKEN_ADMIN' | \
+  GUARDIAN_DOWNLOAD_TOKEN='TOKEN_ADMIN' GUARDIAN_AGENT_TOKEN='TOKEN_AGENTE' bash
 ```
 
 Controle do agente no Android:
@@ -195,3 +196,31 @@ powershell -ExecutionPolicy Bypass -File .\stop-guardian.ps1
 ## 💻 Licença
 
 Desenvolvido como projeto de engenharia de segurança de sistemas.
+
+---
+
+## 🔐 Hardening obrigatório para uso profissional
+
+Antes de expor o Guardian fora de um laboratório, configure tokens fortes e únicos:
+
+```bash
+export GUARDIAN_ADMIN_TOKEN="troque-por-um-token-admin-longo"
+export GUARDIAN_AGENT_TOKEN="troque-por-um-token-de-agente-longo"
+export GUARDIAN_REQUIRE_ADMIN_TOKEN=true
+export NODE_ENV=production
+```
+
+No console web, informe a API e o token administrativo no build/runtime do Vite:
+
+```bash
+VITE_GUARDIAN_API_URL="http://IP_DA_MAQUINA_MESTRE:4000" \
+VITE_GUARDIAN_ADMIN_TOKEN="$GUARDIAN_ADMIN_TOKEN" \
+VITE_GUARDIAN_AGENT_TOKEN="$GUARDIAN_AGENT_TOKEN" \
+npm run build
+```
+
+Notas de segurança:
+- Em `NODE_ENV=production`, o Core rejeita cadastro/heartbeat se o token padrão de agente não for trocado.
+- Em laboratório/dev, os scripts preservam compatibilidade com agentes já instalados usando o token padrão; para rotação obrigatória, defina `GUARDIAN_AGENT_TOKEN` manualmente ou use `GUARDIAN_STRICT_AGENT_TOKEN=true`.
+- Endpoints administrativos, telemetria, alertas, regras, SSE e downloads de instaladores/agentes exigem `GUARDIAN_ADMIN_TOKEN` quando configurado; os scripts `start-guardian.*` geram e persistem token administrativo local quando você não informar valor próprio.
+- O limite padrão do payload JSON é `1mb`; ajuste com `GUARDIAN_JSON_LIMIT` apenas se houver necessidade operacional.

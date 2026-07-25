@@ -125,6 +125,16 @@ interface EDRAlert {
   status: 'ACTIVE' | 'MITIGATED' | 'DISMISSED';
 }
 
+const API_BASE_URL = import.meta.env.VITE_GUARDIAN_API_URL || 'http://localhost:4000';
+const ADMIN_TOKEN = import.meta.env.VITE_GUARDIAN_ADMIN_TOKEN || '';
+const AGENT_TOKEN = import.meta.env.VITE_GUARDIAN_AGENT_TOKEN || ADMIN_TOKEN;
+
+function guardianFetch(path: string, init: RequestInit = {}) {
+  const headers = new Headers(init.headers || {});
+  if (ADMIN_TOKEN) headers.set('x-guardian-admin-token', ADMIN_TOKEN);
+  return fetch(`${API_BASE_URL}${path}`, { ...init, headers });
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<'endpoints' | 'agentless' | 'network_map' | 'mitre_matrix' | 'processes' | 'network' | 'files' | 'rules'>('endpoints');
   const [selectedHostFilter, setSelectedHostFilter] = useState<string>('ALL');
@@ -154,10 +164,12 @@ export default function App() {
   const [showAndroidInstallModal, setShowAndroidInstallModal] = useState(false);
   const [copiedCmd, setCopiedCmd] = useState(false);
 
+  const androidInstallCommand = `pkg install -y curl bash && curl -sSL '${API_BASE_URL}/android.sh${ADMIN_TOKEN ? `?token=${encodeURIComponent(ADMIN_TOKEN)}` : ''}' | GUARDIAN_DOWNLOAD_TOKEN='${ADMIN_TOKEN}' GUARDIAN_AGENT_TOKEN='${AGENT_TOKEN}' bash`;
+
   const fetchData = async () => {
     setLoading(true);
     try {
-      const healthRes = await fetch('http://localhost:4000/api/v1/health');
+      const healthRes = await guardianFetch('/api/v1/health');
       if (healthRes.ok) {
         const healthData = await healthRes.json();
         if (healthData.detectedSubnets && healthData.detectedSubnets.length > 0) {
@@ -165,25 +177,25 @@ export default function App() {
         }
       }
 
-      const devRes = await fetch('http://localhost:4000/api/v1/network/scan/latest');
+      const devRes = await guardianFetch('/api/v1/network/scan/latest');
       if (devRes.ok) setAgentlessDevices(await devRes.json());
 
-      const res = await fetch('http://localhost:4000/api/v1/agents');
+      const res = await guardianFetch('/api/v1/agents');
       if (res.ok) setAgents(await res.json());
 
-      const procRes = await fetch('http://localhost:4000/api/v1/processes');
+      const procRes = await guardianFetch('/api/v1/processes');
       if (procRes.ok) setProcesses(await procRes.json());
 
-      const netRes = await fetch('http://localhost:4000/api/v1/network');
+      const netRes = await guardianFetch('/api/v1/network');
       if (netRes.ok) setNetworkConns(await netRes.json());
 
-      const filesRes = await fetch('http://localhost:4000/api/v1/files');
+      const filesRes = await guardianFetch('/api/v1/files');
       if (filesRes.ok) setFileEvents(await filesRes.json());
 
-      const rulesRes = await fetch('http://localhost:4000/api/v1/rules');
+      const rulesRes = await guardianFetch('/api/v1/rules');
       if (rulesRes.ok) setRules(await rulesRes.json());
 
-      const alertsRes = await fetch('http://localhost:4000/api/v1/alerts');
+      const alertsRes = await guardianFetch('/api/v1/alerts');
       if (alertsRes.ok) setAlerts(await alertsRes.json());
     } catch (err) {
       console.warn('Backend API connection warning:', err);
@@ -195,7 +207,7 @@ export default function App() {
   useEffect(() => {
     fetchData();
 
-    const eventSource = new EventSource('http://localhost:4000/api/v1/stream');
+    const eventSource = new EventSource(`${API_BASE_URL}/api/v1/stream${ADMIN_TOKEN ? `?token=${encodeURIComponent(ADMIN_TOKEN)}` : ''}`);
     eventSource.addEventListener('alert', (e) => {
       try {
         const newAlert = JSON.parse((e as MessageEvent).data);
@@ -228,7 +240,7 @@ export default function App() {
     setScanningNetwork(true);
     setActionMessage(`📡 Iniciando Varredura Real na Sub-rede ${detectedSubnet}.0/24...`);
     try {
-      const res = await fetch('http://localhost:4000/api/v1/network/scan', {
+      const res = await guardianFetch('/api/v1/network/scan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ subnet: detectedSubnet }),
@@ -248,7 +260,7 @@ export default function App() {
 
   const handleIsolateHost = async (agentId: string) => {
     try {
-      const res = await fetch('http://localhost:4000/api/v1/response/isolate', {
+      const res = await guardianFetch('/api/v1/response/isolate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ agentId }),
@@ -265,7 +277,7 @@ export default function App() {
 
   const handleDeleteAgent = async (agentId: string) => {
     try {
-      const res = await fetch(`http://localhost:4000/api/v1/agents/${agentId}`, {
+      const res = await guardianFetch(`/api/v1/agents/${agentId}`, {
         method: 'DELETE',
       });
       if (res.ok) {
@@ -280,7 +292,7 @@ export default function App() {
 
   const handleKillProcess = async (agentId: string, pid: number) => {
     try {
-      const res = await fetch('http://localhost:4000/api/v1/response/kill', {
+      const res = await guardianFetch('/api/v1/response/kill', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ agentId, pid }),
@@ -300,7 +312,7 @@ export default function App() {
     if (!newRuleId || !newRuleName) return;
 
     try {
-      await fetch('http://localhost:4000/api/v1/rules/create', {
+      await guardianFetch('/api/v1/rules/create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1393,11 +1405,11 @@ export default function App() {
               </span>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: '#090d16', padding: '12px 14px', borderRadius: '8px', border: '1px solid #1e293b' }}>
                 <code className="mono-text" style={{ fontSize: '0.85rem', color: '#34d399', wordBreak: 'break-all' }}>
-                  pkg install -y curl bash && curl -sSL http://{window.location.hostname}:4000/android.sh | bash
+                  {androidInstallCommand}
                 </code>
                 <button
                   onClick={() => {
-                    navigator.clipboard.writeText(`pkg install -y curl bash && curl -sSL http://${window.location.hostname}:4000/android.sh | bash`);
+                    navigator.clipboard.writeText(androidInstallCommand);
                     setCopiedCmd(true);
                     setTimeout(() => setCopiedCmd(false), 3000);
                   }}

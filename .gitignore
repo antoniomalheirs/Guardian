@@ -1,3 +1,8 @@
-**\node_modules
-**\debug
-**\release
+node_modules/
+**/node_modules/
+**/target/debug/
+**/target/release/
+.guardian-pids/
+.guardian-logs/
+.guardian-secrets.env
+.guardian-secrets.ps1

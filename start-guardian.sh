@@ -16,6 +16,7 @@ CONSOLE_PID_FILE="$PID_DIR/console.pid"
 AGENT_PID_FILE="$PID_DIR/agent.pid"
 API_PORT="${GUARDIAN_API_PORT:-4000}"
 CONSOLE_PORT="${GUARDIAN_CONSOLE_PORT:-4001}"
+SECRETS_FILE="$SCRIPT_DIR/.guardian-secrets.env"
 
 GREEN='\033[0;32m'; CYAN='\033[0;36m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; NC='\033[0m'
 
@@ -30,6 +31,39 @@ get_local_ip() {
   elif command -v hostname >/dev/null 2>&1; then
     hostname -I 2>/dev/null | awk '{print $1}'
   fi
+}
+
+
+load_or_create_secrets() {
+  local user_supplied_agent_token="${GUARDIAN_AGENT_TOKEN:-}"
+  if [ -f "$SECRETS_FILE" ]; then
+    set -a
+    # shellcheck disable=SC1090
+    . "$SECRETS_FILE"
+    set +a
+  fi
+
+  local changed=false
+  if [ -z "${GUARDIAN_ADMIN_TOKEN:-}" ]; then
+    GUARDIAN_ADMIN_TOKEN="$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))")"
+    changed=true
+  fi
+  if [ -z "$user_supplied_agent_token" ] && [ "${NODE_ENV:-}" != "production" ] && [ "${GUARDIAN_STRICT_AGENT_TOKEN:-false}" != "true" ]; then
+    # Compatibilidade: agentes já instalados usam o token padrão em laboratório/dev.
+    GUARDIAN_AGENT_TOKEN="${GUARDIAN_AGENT_TOKEN:-GUARDIAN-SECRET-AGENT-KEY-v0.9}"
+  elif [ -z "${GUARDIAN_AGENT_TOKEN:-}" ]; then
+    GUARDIAN_AGENT_TOKEN="$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))")"
+    changed=true
+  fi
+  if [ "$changed" = true ] || [ ! -f "$SECRETS_FILE" ]; then
+    umask 077
+    cat > "$SECRETS_FILE" <<EOF
+export GUARDIAN_ADMIN_TOKEN="$GUARDIAN_ADMIN_TOKEN"
+export GUARDIAN_AGENT_TOKEN="$GUARDIAN_AGENT_TOKEN"
+EOF
+    printf "       ${GREEN}✓ Segredos Guardian salvos em %s${NC}\n" "$SECRETS_FILE"
+  fi
+  export GUARDIAN_ADMIN_TOKEN GUARDIAN_AGENT_TOKEN
 }
 
 require_cmd() {
@@ -67,6 +101,7 @@ pkill -f "guardian_termux_agent.py" 2>/dev/null || true
 printf "${YELLOW}[2/5] Verificando dependências Node.js/npm...${NC}\n"
 require_cmd node
 require_cmd npm
+load_or_create_secrets
 if is_termux; then
   command -v python >/dev/null 2>&1 || command -v python3 >/dev/null 2>&1 || printf "       ${YELLOW}[INFO] Python não encontrado; agente local Termux não será iniciado.${NC}\n"
 fi
@@ -80,26 +115,26 @@ done
 
 printf "${YELLOW}[3/5] Compilando Core API e Console Web...${NC}\n"
 (cd "$CORE_DIR" && npm run build)
-(cd "$CONSOLE_DIR" && npm run build)
+(cd "$CONSOLE_DIR" && VITE_GUARDIAN_API_URL="$SERVER_URL" VITE_GUARDIAN_ADMIN_TOKEN="$GUARDIAN_ADMIN_TOKEN" VITE_GUARDIAN_AGENT_TOKEN="$GUARDIAN_AGENT_TOKEN" npm run build)
 printf "       ${GREEN}✓ Builds concluídos.${NC}\n"
 
 printf "${YELLOW}[4/5] Subindo API (%s) e Dashboard (%s)...${NC}\n" "$API_PORT" "$CONSOLE_PORT"
-( cd "$CORE_DIR" && PORT="$API_PORT" nohup node dist/index.js > "$LOG_DIR/core.log" 2>&1 & echo $! > "$CORE_PID_FILE" )
-( cd "$CONSOLE_DIR" && nohup npm run dev -- --host 0.0.0.0 --port "$CONSOLE_PORT" > "$LOG_DIR/console.log" 2>&1 & echo $! > "$CONSOLE_PID_FILE" )
+( cd "$CORE_DIR" && PORT="$API_PORT" GUARDIAN_ADMIN_TOKEN="$GUARDIAN_ADMIN_TOKEN" GUARDIAN_AGENT_TOKEN="$GUARDIAN_AGENT_TOKEN" nohup node dist/index.js > "$LOG_DIR/core.log" 2>&1 & echo $! > "$CORE_PID_FILE" )
+( cd "$CONSOLE_DIR" && VITE_GUARDIAN_API_URL="$SERVER_URL" VITE_GUARDIAN_ADMIN_TOKEN="$GUARDIAN_ADMIN_TOKEN" VITE_GUARDIAN_AGENT_TOKEN="$GUARDIAN_AGENT_TOKEN" nohup npm run dev -- --host 0.0.0.0 --port "$CONSOLE_PORT" > "$LOG_DIR/console.log" 2>&1 & echo $! > "$CONSOLE_PID_FILE" )
 
 printf "${YELLOW}[5/5] Iniciando agente local quando disponível...${NC}\n"
 if is_termux; then
   PYTHON_BIN="$(command -v python || command -v python3 || true)"
   if [ -n "$PYTHON_BIN" ] && [ -f "$AGENT_DIR/guardian_termux_agent.py" ]; then
-    nohup "$PYTHON_BIN" "$AGENT_DIR/guardian_termux_agent.py" "$SERVER_URL" > "$LOG_DIR/agent.log" 2>&1 & echo $! > "$AGENT_PID_FILE"
+    GUARDIAN_AGENT_TOKEN="$GUARDIAN_AGENT_TOKEN" nohup "$PYTHON_BIN" "$AGENT_DIR/guardian_termux_agent.py" "$SERVER_URL" > "$LOG_DIR/agent.log" 2>&1 & echo $! > "$AGENT_PID_FILE"
     printf "       ${GREEN}✓ Agente Python Termux iniciado contra %s.${NC}\n" "$SERVER_URL"
   fi
 else
   if [ -x "$AGENT_DIR/target/release/guardian-agent" ]; then
-    nohup "$AGENT_DIR/target/release/guardian-agent" "$SERVER_URL" > "$LOG_DIR/agent.log" 2>&1 & echo $! > "$AGENT_PID_FILE"
+    GUARDIAN_AGENT_TOKEN="$GUARDIAN_AGENT_TOKEN" nohup "$AGENT_DIR/target/release/guardian-agent" "$SERVER_URL" > "$LOG_DIR/agent.log" 2>&1 & echo $! > "$AGENT_PID_FILE"
     printf "       ${GREEN}✓ Agente Rust Linux iniciado contra %s.${NC}\n" "$SERVER_URL"
   elif [ -x "$AGENT_DIR/target/debug/guardian-agent" ]; then
-    nohup "$AGENT_DIR/target/debug/guardian-agent" "$SERVER_URL" > "$LOG_DIR/agent.log" 2>&1 & echo $! > "$AGENT_PID_FILE"
+    GUARDIAN_AGENT_TOKEN="$GUARDIAN_AGENT_TOKEN" nohup "$AGENT_DIR/target/debug/guardian-agent" "$SERVER_URL" > "$LOG_DIR/agent.log" 2>&1 & echo $! > "$AGENT_PID_FILE"
     printf "       ${GREEN}✓ Agente Rust Linux (debug) iniciado contra %s.${NC}\n" "$SERVER_URL"
   else
     printf "       ${YELLOW}[INFO] Agente Rust não compilado. Para ativar: cd guardian-agent && cargo build --release${NC}\n"
@@ -124,5 +159,5 @@ printf "${CYAN} 🌐 Dashboard Web:       http://localhost:%s${NC}\n" "$CONSOLE_
 printf "${CYAN} 🌐 Dashboard Rede:      http://%s:%s${NC}\n" "$LOCAL_IP" "$CONSOLE_PORT"
 printf "${CYAN} 🛡️ API Core Server:    %s${NC}\n" "$SERVER_URL"
 printf "${CYAN} 📄 Logs:                %s${NC}\n" "$LOG_DIR"
-printf "${YELLOW} 📱 Termux Android:      pkg install -y curl bash && curl -sSL %s/android.sh | bash${NC}\n" "$SERVER_URL"
+printf "${YELLOW} 📱 Termux Android:      pkg install -y curl bash && curl -sSL '%s/android.sh?token=%s' | GUARDIAN_DOWNLOAD_TOKEN='%s' GUARDIAN_AGENT_TOKEN='%s' bash${NC}\n" "$SERVER_URL" "$GUARDIAN_ADMIN_TOKEN" "$GUARDIAN_ADMIN_TOKEN" "$GUARDIAN_AGENT_TOKEN"
 printf "${GREEN}======================================================================${NC}\n"
