@@ -10,10 +10,12 @@ CORE_DIR="$SCRIPT_DIR/guardian-core"
 CONSOLE_DIR="$SCRIPT_DIR/guardian-console"
 AGENT_DIR="$SCRIPT_DIR/guardian-agent"
 PID_DIR="$SCRIPT_DIR/.guardian-pids"
+LOG_DIR="$SCRIPT_DIR/.guardian-logs"
 CORE_PID_FILE="$PID_DIR/core.pid"
 CONSOLE_PID_FILE="$PID_DIR/console.pid"
 AGENT_PID_FILE="$PID_DIR/agent.pid"
-LOG_DIR="$SCRIPT_DIR/.guardian-logs"
+API_PORT="${GUARDIAN_API_PORT:-4000}"
+CONSOLE_PORT="${GUARDIAN_CONSOLE_PORT:-4001}"
 
 GREEN='\033[0;32m'; CYAN='\033[0;36m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; NC='\033[0m'
 
@@ -30,29 +32,27 @@ get_local_ip() {
   fi
 }
 
-stop_pid_file() {
-  local file="$1"
-  if [ -f "$file" ]; then
-    local pid
-    pid="$(cat "$file" 2>/dev/null || true)"
-    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-      kill "$pid" 2>/dev/null || true
-      sleep 1
-      kill -9 "$pid" 2>/dev/null || true
-    fi
-    rm -f "$file"
-  fi
-}
-
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
-    echo -e "${RED}[ERRO] Comando obrigatório não encontrado: $1${NC}" >&2
+    printf "${RED}[ERRO] Comando obrigatório não encontrado: %s${NC}\n" "$1" >&2
     exit 1
   fi
 }
 
+wait_for_http() {
+  local url="$1" retries="${2:-30}"
+  for _ in $(seq 1 "$retries"); do
+    if command -v curl >/dev/null 2>&1 && curl -fsS "$url" >/dev/null 2>&1; then
+      return 0
+    fi
+    printf "."; sleep 1
+  done
+  return 1
+}
+
 LOCAL_IP="$(get_local_ip || true)"
 LOCAL_IP="${LOCAL_IP:-localhost}"
+SERVER_URL="${GUARDIAN_SERVER_URL:-http://$LOCAL_IP:$API_PORT}"
 
 printf "${CYAN}======================================================================${NC}\n"
 printf "${GREEN} 🛡️ INICIALIZANDO GUARDIAN EDR & NDR MASTER SYSTEM (%s)${NC}\n" "$LOCAL_IP"
@@ -67,6 +67,9 @@ pkill -f "guardian_termux_agent.py" 2>/dev/null || true
 printf "${YELLOW}[2/5] Verificando dependências Node.js/npm...${NC}\n"
 require_cmd node
 require_cmd npm
+if is_termux; then
+  command -v python >/dev/null 2>&1 || command -v python3 >/dev/null 2>&1 || printf "       ${YELLOW}[INFO] Python não encontrado; agente local Termux não será iniciado.${NC}\n"
+fi
 
 for dir in "$CORE_DIR" "$CONSOLE_DIR"; do
   if [ ! -d "$dir/node_modules" ]; then
@@ -80,54 +83,46 @@ printf "${YELLOW}[3/5] Compilando Core API e Console Web...${NC}\n"
 (cd "$CONSOLE_DIR" && npm run build)
 printf "       ${GREEN}✓ Builds concluídos.${NC}\n"
 
-printf "${YELLOW}[4/5] Subindo API (4000) e Dashboard (4001)...${NC}\n"
-( cd "$CORE_DIR" && PORT=4000 nohup node dist/index.js > "$LOG_DIR/core.log" 2>&1 & echo $! > "$CORE_PID_FILE" )
-( cd "$CONSOLE_DIR" && nohup npm run dev -- --host 0.0.0.0 > "$LOG_DIR/console.log" 2>&1 & echo $! > "$CONSOLE_PID_FILE" )
+printf "${YELLOW}[4/5] Subindo API (%s) e Dashboard (%s)...${NC}\n" "$API_PORT" "$CONSOLE_PORT"
+( cd "$CORE_DIR" && PORT="$API_PORT" nohup node dist/index.js > "$LOG_DIR/core.log" 2>&1 & echo $! > "$CORE_PID_FILE" )
+( cd "$CONSOLE_DIR" && nohup npm run dev -- --host 0.0.0.0 --port "$CONSOLE_PORT" > "$LOG_DIR/console.log" 2>&1 & echo $! > "$CONSOLE_PID_FILE" )
 
 printf "${YELLOW}[5/5] Iniciando agente local quando disponível...${NC}\n"
 if is_termux; then
-  if [ -f "$AGENT_DIR/guardian_termux_agent.py" ]; then
-    nohup python "$AGENT_DIR/guardian_termux_agent.py" "http://$LOCAL_IP:4000" > "$LOG_DIR/agent.log" 2>&1 & echo $! > "$AGENT_PID_FILE"
-    printf "       ${GREEN}✓ Agente Python Termux iniciado.${NC}\n"
+  PYTHON_BIN="$(command -v python || command -v python3 || true)"
+  if [ -n "$PYTHON_BIN" ] && [ -f "$AGENT_DIR/guardian_termux_agent.py" ]; then
+    nohup "$PYTHON_BIN" "$AGENT_DIR/guardian_termux_agent.py" "$SERVER_URL" > "$LOG_DIR/agent.log" 2>&1 & echo $! > "$AGENT_PID_FILE"
+    printf "       ${GREEN}✓ Agente Python Termux iniciado contra %s.${NC}\n" "$SERVER_URL"
   fi
 else
   if [ -x "$AGENT_DIR/target/release/guardian-agent" ]; then
-    nohup "$AGENT_DIR/target/release/guardian-agent" > "$LOG_DIR/agent.log" 2>&1 & echo $! > "$AGENT_PID_FILE"
-    printf "       ${GREEN}✓ Agente Rust Linux iniciado.${NC}\n"
+    nohup "$AGENT_DIR/target/release/guardian-agent" "$SERVER_URL" > "$LOG_DIR/agent.log" 2>&1 & echo $! > "$AGENT_PID_FILE"
+    printf "       ${GREEN}✓ Agente Rust Linux iniciado contra %s.${NC}\n" "$SERVER_URL"
   elif [ -x "$AGENT_DIR/target/debug/guardian-agent" ]; then
-    nohup "$AGENT_DIR/target/debug/guardian-agent" > "$LOG_DIR/agent.log" 2>&1 & echo $! > "$AGENT_PID_FILE"
-    printf "       ${GREEN}✓ Agente Rust Linux (debug) iniciado.${NC}\n"
+    nohup "$AGENT_DIR/target/debug/guardian-agent" "$SERVER_URL" > "$LOG_DIR/agent.log" 2>&1 & echo $! > "$AGENT_PID_FILE"
+    printf "       ${GREEN}✓ Agente Rust Linux (debug) iniciado contra %s.${NC}\n" "$SERVER_URL"
   else
     printf "       ${YELLOW}[INFO] Agente Rust não compilado. Para ativar: cd guardian-agent && cargo build --release${NC}\n"
   fi
 fi
 
 printf "\n       Aguardando API Mestre"
-healthy=false
-for _ in $(seq 1 20); do
-  if command -v curl >/dev/null 2>&1 && curl -fsS "http://localhost:4000/api/v1/health" >/dev/null 2>&1; then
-    healthy=true; break
-  fi
-  printf "."; sleep 1
-done
-printf "\n"
-
-if [ "$healthy" = true ]; then
-  printf "       ${GREEN}✓ Servidor API respondendo na porta 4000.${NC}\n"
+if wait_for_http "http://localhost:$API_PORT/api/v1/health" 30; then
+  printf "\n       ${GREEN}✓ Servidor API respondendo na porta %s.${NC}\n" "$API_PORT"
 else
-  printf "       ${YELLOW}[AVISO] API ainda inicializando. Veja $LOG_DIR/core.log${NC}\n"
+  printf "\n       ${YELLOW}[AVISO] API ainda inicializando. Veja %s/core.log${NC}\n" "$LOG_DIR"
 fi
 
 if command -v xdg-open >/dev/null 2>&1; then
-  xdg-open "http://localhost:4001" >/dev/null 2>&1 || true
+  xdg-open "http://localhost:$CONSOLE_PORT" >/dev/null 2>&1 || true
 fi
 
 printf "\n${GREEN}======================================================================${NC}\n"
 printf "${GREEN} ✅ SISTEMA MESTRE GUARDIAN EDR & NDR ATIVADO!${NC}\n"
 printf "${GREEN}======================================================================${NC}\n"
-printf "${CYAN} 🌐 Dashboard Web:       http://localhost:4001${NC}\n"
-printf "${CYAN} 🌐 Dashboard Rede:      http://%s:4001${NC}\n" "$LOCAL_IP"
-printf "${CYAN} 🛡️ API Core Server:    http://%s:4000${NC}\n" "$LOCAL_IP"
+printf "${CYAN} 🌐 Dashboard Web:       http://localhost:%s${NC}\n" "$CONSOLE_PORT"
+printf "${CYAN} 🌐 Dashboard Rede:      http://%s:%s${NC}\n" "$LOCAL_IP" "$CONSOLE_PORT"
+printf "${CYAN} 🛡️ API Core Server:    %s${NC}\n" "$SERVER_URL"
 printf "${CYAN} 📄 Logs:                %s${NC}\n" "$LOG_DIR"
-printf "${YELLOW} 📱 Termux Android:      pkg install -y curl bash && curl -sSL http://%s:4000/android.sh | bash${NC}\n" "$LOCAL_IP"
+printf "${YELLOW} 📱 Termux Android:      pkg install -y curl bash && curl -sSL %s/android.sh | bash${NC}\n" "$SERVER_URL"
 printf "${GREEN}======================================================================${NC}\n"
