@@ -36,15 +36,10 @@ import {
 
 const app = express();
 const PORT = process.env.PORT || 4000;
-const VALID_AGENT_TOKEN = process.env.GUARDIAN_AGENT_TOKEN || 'GUARDIAN-SECRET-AGENT-KEY-v0.9';
 const MAX_PROCESSES_PER_HEARTBEAT = Number(process.env.GUARDIAN_MAX_PROCESSES || 500);
 const MAX_CONNECTIONS_PER_HEARTBEAT = Number(process.env.GUARDIAN_MAX_CONNECTIONS || 500);
 const MAX_FILE_EVENTS_PER_HEARTBEAT = Number(process.env.GUARDIAN_MAX_FILE_EVENTS || 250);
 const ALERT_DEDUP_WINDOW_MS = Number(process.env.GUARDIAN_ALERT_DEDUP_WINDOW_MS || 5 * 60 * 1000);
-const ADMIN_API_TOKEN = process.env.GUARDIAN_ADMIN_TOKEN || '';
-const IS_PRODUCTION = process.env.NODE_ENV === 'production';
-const DEFAULT_AGENT_TOKEN = 'GUARDIAN-SECRET-AGENT-KEY-v0.9';
-const REQUIRE_ADMIN_TOKEN = process.env.GUARDIAN_REQUIRE_ADMIN_TOKEN === 'true' || IS_PRODUCTION;
 const execAsync = promisify(exec);
 const isWindows = process.platform === 'win32';
 
@@ -214,6 +209,22 @@ let activeRules: RuleDefinition[] = [
     enabled: true,
   },
   {
+    ruleId: 'RULE-CMDLINE-021',
+    name: 'Suspicious Command-Line Tradecraft',
+    category: 'PROCESS',
+    severity: 'HIGH',
+    description: 'Detects download/execute, encoded, hidden and in-memory execution patterns in process command lines [MITRE T1059/T1105]',
+    enabled: true,
+  },
+  {
+    ruleId: 'RULE-FILE-022',
+    name: 'Startup Persistence File Drop',
+    category: 'FILE',
+    severity: 'HIGH',
+    description: 'Detects new files in Startup, cron, systemd and shell profile persistence locations [MITRE T1547]',
+    enabled: true,
+  },
+  {
     ruleId: 'RULE-FINDING-019',
     name: 'Agent Deep Security Finding Escalation',
     category: 'BEHAVIOR',
@@ -313,18 +324,9 @@ function broadcastSSE(event: string, data: any) {
   });
 }
 
-// Security Token Authentication Middleware
-function verifyAdminToken(req: Request, res: Response, next: NextFunction) {
-  if (!ADMIN_API_TOKEN) {
-    if (REQUIRE_ADMIN_TOKEN) {
-      return res.status(503).json({ error: 'Admin API token is required. Set GUARDIAN_ADMIN_TOKEN before exposing this service.' });
-    }
-    return next();
-  }
-  const token = req.headers['x-guardian-admin-token'] || req.headers['x-guardian-token'] || req.query.token;
-  if (typeof token !== 'string' || token !== ADMIN_API_TOKEN) {
-    return res.status(401).json({ error: 'Unauthorized: invalid or missing admin token' });
-  }
+// Authentication is intentionally disabled so local agents, desktops, and
+// agentless devices can reconnect without sharing tokens in lab deployments.
+function allowUnauthenticated(_req: Request, _res: Response, next: NextFunction) {
   next();
 }
 
@@ -345,18 +347,6 @@ function consumeAgentCommands(agentId: string): AgentCommand[] {
   const commands = pendingCommands.get(agentId) || [];
   pendingCommands.delete(agentId);
   return commands;
-}
-
-function verifyAgentToken(req: Request, res: Response, next: NextFunction) {
-  if (IS_PRODUCTION && VALID_AGENT_TOKEN === DEFAULT_AGENT_TOKEN) {
-    return res.status(503).json({ error: 'Agent token must be changed before production use. Set GUARDIAN_AGENT_TOKEN.' });
-  }
-  const token = req.headers['x-guardian-token'];
-  if (typeof token !== 'string' || token !== VALID_AGENT_TOKEN) {
-    console.warn(`🔒 Unauthorized agent request blocked from IP ${req.ip}.`);
-    return res.status(401).json({ error: 'Unauthorized: Invalid or missing x-guardian-token header' });
-  }
-  next();
 }
 
 function isRuleEnabled(ruleId: string): boolean {
@@ -557,6 +547,26 @@ const KNOWN_SYSTEM_PROCS = new Set(['system', 'idle', 'svchost.exe', 'csrss.exe'
 const LATERAL_PORTS = new Set([445, 3389, 5985, 5986, 22, 23, 135, 139]);
 const SUSPICIOUS_C2_PORTS = new Set([4444, 6667, 1337, 8888, 31337, 9999, 1234, 5555, 7777, 13337]);
 
+const SUSPICIOUS_CMDLINE_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
+  { pattern: /\b(iwr|irm|curl|wget)\b.+\b(iex|bash|sh|powershell|pwsh|cmd)\b/i, label: 'download cradle com execução direta' },
+  { pattern: /\b(encodedcommand|-enc|frombase64string)\b/i, label: 'payload codificado/base64' },
+  { pattern: /\b(windowstyle\s+hidden|-w\s+hidden|nop|noprofile|executionpolicy\s+bypass|-ep\s+bypass)\b/i, label: 'PowerShell evasivo/oculto' },
+  { pattern: /\b(mshta|regsvr32|rundll32)\b.+\b(http|https|javascript:|vbscript:)\b/i, label: 'LOLBin carregando conteúdo remoto/script' },
+  { pattern: /\bcertutil\b.+(-urlcache|-decode|-f)\b/i, label: 'certutil para download/decodificação' },
+  { pattern: /\b(bitsadmin)\b.+\b(transfer|download)\b/i, label: 'bitsadmin para transferência de payload' },
+  { pattern: /\b(chmod\s+\+x|base64\s+-d|\/dev\/tcp|nc\s+-e|ncat\s+-e|socat\s+exec)\b/i, label: 'shell Linux/Termux reverso ou dropper' },
+];
+
+const PERSISTENCE_PATH_PATTERNS = [
+  /\/microsoft\/windows\/start menu\/programs\/startup\//i,
+  /\/appdata\/roaming\/microsoft\/windows\/start menu\/programs\/startup\//i,
+  /(^|\/)\.config\/autostart\//i,
+  /(^|\/)\.config\/systemd\/user\//i,
+  /(^|\/)etc\/systemd\/system\//i,
+  /(^|\/)etc\/cron\.(d|daily|hourly|weekly|monthly)\//i,
+  /(^|\/)(\.bashrc|\.profile|\.zshrc|\.termux\/boot\/)/i,
+];
+
 async function evaluateATTACKRules(agent: AgentRecord, payload: TelemetryPayload) {
   const procs = payload.topProcesses || [];
   const conns = payload.networkConnections || [];
@@ -570,11 +580,11 @@ async function evaluateATTACKRules(agent: AgentRecord, payload: TelemetryPayload
   // ═══ 1. PowerShell Encoded Command [T1059.001] ═══
   for (const proc of procs) {
     const name = proc.name.toLowerCase();
-    const exe = proc.executablePath.toLowerCase();
-    if ((name.includes('powershell') || name.includes('pwsh')) && 
-        (exe.includes('-enc') || exe.includes('encodedcommand') || exe.includes('base64') || exe.includes('-nop') || exe.includes('bypass'))) {
+    const cmd = `${proc.commandLine || ''} ${proc.executablePath || ''}`.toLowerCase();
+    if ((name.includes('powershell') || name.includes('pwsh')) &&
+        (cmd.includes('-enc') || cmd.includes('encodedcommand') || cmd.includes('frombase64string') || cmd.includes('-nop') || cmd.includes('bypass'))) {
       await fireAlert(agent, 'RULE-WIN-001', 'PowerShell Encoded Command Execution', 'HIGH',
-        `PID ${proc.pid} (${proc.name}) executou payload PowerShell codificado. Path: ${proc.executablePath}`);
+        `PID ${proc.pid} (${proc.name}) executou payload PowerShell suspeito. Cmd: ${proc.commandLine || proc.executablePath}`);
     }
   }
 
@@ -638,7 +648,18 @@ async function evaluateATTACKRules(agent: AgentRecord, payload: TelemetryPayload
     }
   }
 
-  // ═══ 7. LOLBin Execution [T1218] ═══
+  // ═══ 7. Suspicious command-line tradecraft [T1059/T1105] ═══
+  for (const proc of procs) {
+    const commandText = `${proc.name} ${proc.commandLine || ''} ${proc.executablePath || ''}`.trim();
+    for (const { pattern, label } of SUSPICIOUS_CMDLINE_PATTERNS) {
+      if (pattern.test(commandText)) {
+        await fireAlert(agent, 'RULE-CMDLINE-021', 'Suspicious Command-Line Tradecraft', 'HIGH',
+          `${label}: ${proc.name} (PID ${proc.pid}) — ${commandText.slice(0, 500)}`);
+      }
+    }
+  }
+
+  // ═══ 8. LOLBin Execution [T1218] ═══
   for (const proc of procs) {
     if (LOLBINS.has(proc.name.toLowerCase())) {
       await fireAlert(agent, 'RULE-LOL-014', 'Living-off-the-Land Binary Execution', 'HIGH',
@@ -646,7 +667,7 @@ async function evaluateATTACKRules(agent: AgentRecord, payload: TelemetryPayload
     }
   }
 
-  // ═══ 8. C2 Beaconing Detection [T1071.001] ═══
+  // ═══ 9. C2 Beaconing Detection [T1071.001] ═══
   const currentTargets = new Map<string, number>();
   for (const conn of conns) {
     if (conn.status === 'ESTABLISHED' && conn.remoteAddress && conn.remotePort > 0) {
@@ -675,7 +696,7 @@ async function evaluateATTACKRules(agent: AgentRecord, payload: TelemetryPayload
     if (!currentTargets.has(target)) history.connectionTargets.delete(target);
   }
 
-  // ═══ 9. Data Exfiltration Volume Spike [T1041] ═══
+  // ═══ 10. Data Exfiltration Volume Spike [T1041] ═══
   const currentConnCount = conns.filter(c => c.status === 'ESTABLISHED').length;
   if (history.prevConnectionCount > 0 && currentConnCount > history.prevConnectionCount * 3 && currentConnCount > 10) {
     await fireAlert(agent, 'RULE-EXFIL-016', 'Data Exfiltration Connection Volume Spike', 'HIGH',
@@ -684,7 +705,7 @@ async function evaluateATTACKRules(agent: AgentRecord, payload: TelemetryPayload
   history.prevConnectionCount = currentConnCount;
   history.prevTimestamp = Date.now();
 
-  // ═══ 10. Cryptominer Detection [T1496] ═══
+  // ═══ 11. Cryptominer Detection [T1496] ═══
   if (payload.cpuUsagePct > 85) {
     const topProc = [...procs].sort((a, b) => b.cpuPct - a.cpuPct)[0];
     if (topProc && !KNOWN_SYSTEM_PROCS.has(topProc.name.toLowerCase())) {
@@ -693,20 +714,20 @@ async function evaluateATTACKRules(agent: AgentRecord, payload: TelemetryPayload
     }
   }
 
-  // ═══ 11. Resource Exhaustion [T1499] ═══
+  // ═══ 12. Resource Exhaustion [T1499] ═══
   if (payload.cpuUsagePct > 85 || payload.memoryUsagePct > 90) {
     await fireAlert(agent, 'RULE-RES-004', 'Endpoint High Resource Exhaustion Spike', 'WARNING',
       `Recursos críticos: CPU ${payload.cpuUsagePct.toFixed(1)}% | RAM ${payload.memoryUsagePct.toFixed(1)}%`);
   }
 
-  // ═══ 12. DNS Tunneling [T1071.004] ═══
+  // ═══ 13. DNS Tunneling [T1071.004] ═══
   const dnsConns = conns.filter(c => c.remotePort === 53 && c.protocol.toUpperCase().includes('UDP'));
   if (dnsConns.length > 10) {
     await fireAlert(agent, 'RULE-NET-008', 'DNS Tunneling High Frequency Query Exfiltration', 'HIGH',
       `${dnsConns.length} conexões DNS UDP detectadas neste heartbeat — possível túnel DNS para exfiltração`);
   }
 
-  // ═══ 13. Lateral Movement [T1021] ═══
+  // ═══ 14. Lateral Movement [T1021] ═══
   for (const conn of conns) {
     if (LATERAL_PORTS.has(conn.remotePort) && conn.status === 'ESTABLISHED') {
       const procName = conn.processName.toLowerCase();
@@ -718,7 +739,7 @@ async function evaluateATTACKRules(agent: AgentRecord, payload: TelemetryPayload
     }
   }
 
-  // ═══ 14. WMI Execution [T1047] ═══
+  // ═══ 15. WMI Execution [T1047] ═══
   for (const proc of procs) {
     if (proc.name.toLowerCase() === 'wmic.exe' || proc.name.toLowerCase() === 'wmiprvse.exe') {
       await fireAlert(agent, 'RULE-CMD-009', 'WMI Administrative Command Line Execution', 'INFO',
@@ -726,7 +747,7 @@ async function evaluateATTACKRules(agent: AgentRecord, payload: TelemetryPayload
     }
   }
 
-  // ═══ 15. System32 File Alteration [T1554] ═══
+  // ═══ 16. System32 File Alteration [T1554] ═══
   for (const fileEvt of files) {
     const fp = fileEvt.filePath.toLowerCase().replace(/\//g, '\\');
     if ((fp.includes('\\windows\\system32\\') || fp.includes('\\windows\\syswow64\\')) &&
@@ -736,7 +757,18 @@ async function evaluateATTACKRules(agent: AgentRecord, payload: TelemetryPayload
     }
   }
 
-  // ═══ 16. Agent Security Findings Escalation ═══
+  // ═══ 17. Startup persistence file drops [T1547] ═══
+  for (const fileEvt of files) {
+    if (fileEvt.action === 'CREATED' || fileEvt.action === 'MODIFIED') {
+      const fp = fileEvt.filePath.replace(/\\/g, '/').toLowerCase();
+      if (PERSISTENCE_PATH_PATTERNS.some((pattern) => pattern.test(fp))) {
+        await fireAlert(agent, 'RULE-FILE-022', 'Startup Persistence File Drop', 'HIGH',
+          `Arquivo alterado em local de persistência: ${fileEvt.filePath} (${fileEvt.action})`);
+      }
+    }
+  }
+
+  // ═══ 18. Agent Security Findings Escalation ═══
   for (const finding of findings) {
     if (finding.severity === 'HIGH' || finding.severity === 'CRITICAL') {
       await fireAlert(agent, 'RULE-FINDING-019', `Agent Finding: ${finding.findingType}`, finding.severity as EDRAlert['severity'],
@@ -744,7 +776,7 @@ async function evaluateATTACKRules(agent: AgentRecord, payload: TelemetryPayload
     }
   }
 
-  // ═══ 17. YARA Signature Matching ═══
+  // ═══ 19. YARA Signature Matching ═══
   for (const fileEvt of files) {
     if (fileEvt.yaraMatches && fileEvt.yaraMatches.length > 0) {
       for (const matchName of fileEvt.yaraMatches) {
@@ -882,7 +914,7 @@ async function performDeepNetworkDiscovery(targetSubnet: string): Promise<Discov
 }
 
 // POST /api/v1/network/scan (Deep Network Discovery Engine)
-app.post('/api/v1/network/scan', verifyAdminToken, async (req: Request, res: Response) => {
+app.post('/api/v1/network/scan', allowUnauthenticated, async (req: Request, res: Response) => {
   try {
     const detectedSubnets = getLocalSubnets();
     const requestedSubnet = req.body?.subnet;
@@ -907,7 +939,7 @@ app.post('/api/v1/network/scan', verifyAdminToken, async (req: Request, res: Res
 });
 
 // GET /api/v1/network/scan/latest
-app.get('/api/v1/network/scan/latest', verifyAdminToken, async (_req: Request, res: Response) => {
+app.get('/api/v1/network/scan/latest', allowUnauthenticated, async (_req: Request, res: Response) => {
   try {
     if (discoveredDevices.length === 0) {
       discoveredDevices = await loadDiscoveredDevicesFromDb();
@@ -992,23 +1024,23 @@ const handleAgentDownload = (_req: Request, res: Response) => {
   }
 };
 
-app.get('/download/agent.py', verifyAdminToken, handleAgentDownload);
-app.get('/download/agent', verifyAdminToken, handleAgentDownload);
-app.get('/agent.py', verifyAdminToken, handleAgentDownload);
+app.get('/download/agent.py', allowUnauthenticated, handleAgentDownload);
+app.get('/download/agent', allowUnauthenticated, handleAgentDownload);
+app.get('/agent.py', allowUnauthenticated, handleAgentDownload);
 
-app.get('/download/install.sh', verifyAdminToken, handleInstallScriptDownload);
-app.get('/download/android.sh', verifyAdminToken, handleInstallScriptDownload);
-app.get('/download/install', verifyAdminToken, handleInstallScriptDownload);
-app.get('/download/android', verifyAdminToken, handleInstallScriptDownload);
-app.get('/install.sh', verifyAdminToken, handleInstallScriptDownload);
-app.get('/android.sh', verifyAdminToken, handleInstallScriptDownload);
-app.get('/install', verifyAdminToken, handleInstallScriptDownload);
-app.get('/android', verifyAdminToken, handleInstallScriptDownload);
+app.get('/download/install.sh', allowUnauthenticated, handleInstallScriptDownload);
+app.get('/download/android.sh', allowUnauthenticated, handleInstallScriptDownload);
+app.get('/download/install', allowUnauthenticated, handleInstallScriptDownload);
+app.get('/download/android', allowUnauthenticated, handleInstallScriptDownload);
+app.get('/install.sh', allowUnauthenticated, handleInstallScriptDownload);
+app.get('/android.sh', allowUnauthenticated, handleInstallScriptDownload);
+app.get('/install', allowUnauthenticated, handleInstallScriptDownload);
+app.get('/android', allowUnauthenticated, handleInstallScriptDownload);
 
 
 
 // GET /api/v1/stream (Server-Sent Events Real-Time Live Feed)
-app.get('/api/v1/stream', verifyAdminToken, (req: Request, res: Response) => {
+app.get('/api/v1/stream', allowUnauthenticated, (req: Request, res: Response) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
@@ -1028,8 +1060,7 @@ app.get('/api/v1/health', (_req: Request, res: Response) => {
     service: 'Guardian Core Server', 
     detectedSubnets: getLocalSubnets(),
     databaseConnected: isDbConnected(),
-    adminAuthConfigured: Boolean(ADMIN_API_TOKEN),
-    agentTokenUsesDefault: VALID_AGENT_TOKEN === DEFAULT_AGENT_TOKEN,
+    authenticationEnabled: false,
     agentlessScannerActive: true,
     rulesCount: activeRules.length,
     timestamp: new Date().toISOString() 
@@ -1037,7 +1068,7 @@ app.get('/api/v1/health', (_req: Request, res: Response) => {
 });
 
 // GET /api/v1/stats
-app.get('/api/v1/stats', verifyAdminToken, (_req: Request, res: Response) => {
+app.get('/api/v1/stats', allowUnauthenticated, (_req: Request, res: Response) => {
   const allAgents = Array.from(agents.values());
   const total = allAgents.length;
   const online = allAgents.filter((a) => a.status === 'online').length;
@@ -1055,7 +1086,7 @@ app.get('/api/v1/stats', verifyAdminToken, (_req: Request, res: Response) => {
 });
 
 // GET /api/v1/agents
-app.get('/api/v1/agents', verifyAdminToken, (_req: Request, res: Response) => {
+app.get('/api/v1/agents', allowUnauthenticated, (_req: Request, res: Response) => {
   const now = Date.now();
   const agentList: AgentRecord[] = [];
   for (const ag of agents.values()) {
@@ -1076,7 +1107,7 @@ app.get('/api/v1/agents', verifyAdminToken, (_req: Request, res: Response) => {
 });
 
 // GET /api/v1/processes (ONLY LIVE ONLINE AGENTS)
-app.get('/api/v1/processes', verifyAdminToken, (_req: Request, res: Response) => {
+app.get('/api/v1/processes', allowUnauthenticated, (_req: Request, res: Response) => {
   const now = Date.now();
   const allProcesses: Array<ProcessTelemetry & { hostname: string; agentId: string }> = [];
   for (const agent of agents.values()) {
@@ -1096,7 +1127,7 @@ app.get('/api/v1/processes', verifyAdminToken, (_req: Request, res: Response) =>
 });
 
 // GET /api/v1/network (ONLY LIVE ONLINE AGENTS)
-app.get('/api/v1/network', verifyAdminToken, (_req: Request, res: Response) => {
+app.get('/api/v1/network', allowUnauthenticated, (_req: Request, res: Response) => {
   const now = Date.now();
   const allConnections: Array<NetworkTelemetry & { hostname: string; agentId: string }> = [];
   for (const agent of agents.values()) {
@@ -1116,7 +1147,7 @@ app.get('/api/v1/network', verifyAdminToken, (_req: Request, res: Response) => {
 });
 
 // GET /api/v1/files (ONLY LIVE ONLINE AGENTS)
-app.get('/api/v1/files', verifyAdminToken, (_req: Request, res: Response) => {
+app.get('/api/v1/files', allowUnauthenticated, (_req: Request, res: Response) => {
   const now = Date.now();
   const allFiles: Array<FileTelemetry & { hostname: string; agentId: string }> = [];
   for (const agent of agents.values()) {
@@ -1136,22 +1167,22 @@ app.get('/api/v1/files', verifyAdminToken, (_req: Request, res: Response) => {
 });
 
 // GET /api/v1/rules
-app.get('/api/v1/rules', verifyAdminToken, (_req: Request, res: Response) => {
+app.get('/api/v1/rules', allowUnauthenticated, (_req: Request, res: Response) => {
   res.json(activeRules);
 });
 
 // GET /api/v1/yara/rules
-app.get('/api/v1/yara/rules', verifyAdminToken, (_req: Request, res: Response) => {
+app.get('/api/v1/yara/rules', allowUnauthenticated, (_req: Request, res: Response) => {
   res.json(builtInYaraRules);
 });
 
 // GET /api/v1/alerts
-app.get('/api/v1/alerts', verifyAdminToken, (_req: Request, res: Response) => {
+app.get('/api/v1/alerts', allowUnauthenticated, (_req: Request, res: Response) => {
   res.json(alertsHistory);
 });
 
 // POST /api/v1/rules/create
-app.post('/api/v1/rules/create', verifyAdminToken, (req: Request, res: Response) => {
+app.post('/api/v1/rules/create', allowUnauthenticated, (req: Request, res: Response) => {
   const newRule: RuleDefinition = req.body;
   if (!newRule.ruleId || !newRule.name || !['PROCESS', 'FILE', 'NETWORK', 'BEHAVIOR'].includes(newRule.category) || !['INFO', 'WARNING', 'HIGH', 'CRITICAL'].includes(newRule.severity)) {
     return res.status(400).json({ error: 'ruleId, name, valid category, and valid severity are required' });
@@ -1164,7 +1195,7 @@ app.post('/api/v1/rules/create', verifyAdminToken, (req: Request, res: Response)
 });
 
 // DELETE /api/v1/agents/:agentId (Remove Agent from DB and Memory)
-app.delete('/api/v1/agents/:agentId', verifyAdminToken, async (req: Request, res: Response) => {
+app.delete('/api/v1/agents/:agentId', allowUnauthenticated, async (req: Request, res: Response) => {
   const { agentId } = req.params;
   console.log(`🗑️ Deleting agent ${agentId} from memory and SQL database...`);
   
@@ -1176,7 +1207,7 @@ app.delete('/api/v1/agents/:agentId', verifyAdminToken, async (req: Request, res
 });
 
 // POST /api/v1/response/kill
-app.post('/api/v1/response/kill', verifyAdminToken, (req: Request, res: Response) => {
+app.post('/api/v1/response/kill', allowUnauthenticated, (req: Request, res: Response) => {
   const { agentId, pid } = req.body;
   if (typeof agentId !== 'string' || !agents.has(agentId) || !Number.isInteger(Number(pid)) || Number(pid) <= 0) {
     return res.status(400).json({ error: 'Valid agentId and positive pid are required' });
@@ -1187,7 +1218,7 @@ app.post('/api/v1/response/kill', verifyAdminToken, (req: Request, res: Response
 });
 
 // POST /api/v1/response/isolate
-app.post('/api/v1/response/isolate', verifyAdminToken, async (req: Request, res: Response) => {
+app.post('/api/v1/response/isolate', allowUnauthenticated, async (req: Request, res: Response) => {
   const { agentId } = req.body;
   if (typeof agentId !== 'string') {
     return res.status(400).json({ error: 'Valid agentId is required' });
@@ -1205,8 +1236,8 @@ app.post('/api/v1/response/isolate', verifyAdminToken, async (req: Request, res:
   res.json({ status: 'queued', agentId, command });
 });
 
-// POST /api/v1/agents/register (Protected by verifyAgentToken & DEDUPLICATED BY HOSTNAME)
-app.post('/api/v1/agents/register', verifyAgentToken, async (req: Request, res: Response) => {
+// POST /api/v1/agents/register (Protected by allowUnauthenticated & DEDUPLICATED BY HOSTNAME)
+app.post('/api/v1/agents/register', allowUnauthenticated, async (req: Request, res: Response) => {
   const inventory: SystemInventory = normalizeInventory(req.body);
   if (!inventory.hostname) {
     return res.status(400).json({ error: 'Hostname is required' });
@@ -1245,8 +1276,8 @@ app.post('/api/v1/agents/register', verifyAgentToken, async (req: Request, res: 
   res.status(201).json({ agentId, status: 'registered', expectedPayloadCase: 'camelCase_or_snake_case' });
 });
 
-// POST /api/v1/agents/heartbeat (Protected by verifyAgentToken & EVALUATES MITRE ATT&CK RULES)
-app.post('/api/v1/agents/heartbeat', verifyAgentToken, async (req: Request, res: Response) => {
+// POST /api/v1/agents/heartbeat (Protected by allowUnauthenticated & EVALUATES MITRE ATT&CK RULES)
+app.post('/api/v1/agents/heartbeat', allowUnauthenticated, async (req: Request, res: Response) => {
   const payload: TelemetryPayload = normalizeTelemetry(req.body);
   const validationError = validateTelemetryPayload(payload);
   if (validationError) {

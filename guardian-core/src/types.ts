@@ -14,6 +14,7 @@ export interface ProcessTelemetry {
   parentPid?: number | null;
   name: string;
   executablePath: string;
+  commandLine?: string;
   cpuPct: number;
   memoryMb: number;
   sha256Hash: string;

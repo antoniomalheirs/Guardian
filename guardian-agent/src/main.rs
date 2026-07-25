@@ -5,7 +5,6 @@ use std::path::Path;
 use std::net::UdpSocket;
 use std::time::Duration;
 use std::collections::HashMap;
-use reqwest::header::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sysinfo::System;
@@ -30,6 +29,7 @@ pub struct ProcessTelemetry {
     pub parent_pid: Option<u32>,
     pub name: String,
     pub executable_path: String,
+    pub command_line: String,
     pub cpu_pct: f32,
     pub memory_mb: u64,
     pub sha256_hash: String,
@@ -503,13 +503,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("📋 OS: {} {} | CPU: {} | RAM: {}MB",
              inventory.os_name, inventory.os_version, inventory.cpu_model, inventory.total_memory_mb);
 
-    // HTTP Client with Security Headers
-    let mut headers = HeaderMap::new();
-    headers.insert("x-guardian-token", HeaderValue::from_static("GUARDIAN-SECRET-AGENT-KEY-v0.9"));
-
-    let client = reqwest::Client::builder()
-        .default_headers(headers)
-        .build()?;
+    // HTTP client without authentication headers for open local lab connectivity.
+    let client = reqwest::Client::builder().build()?;
 
     let register_url = format!("{}/api/v1/agents/register", base_server_url);
     println!("📡 Registering with Guardian Core at {}...", register_url);
@@ -542,7 +537,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         sys.refresh_memory();
         sys.refresh_processes();
 
-        // ── Deep Process Enumeration with SHA-256 & Parent PIDs ──
+        // ── Deep Process Enumeration with SHA-256, Parent PIDs & Command Lines ──
         let mut top_processes: Vec<ProcessTelemetry> = Vec::new();
         let mut process_list: Vec<(&sysinfo::Pid, &sysinfo::Process)> = sys.processes().iter().collect();
         // Sort by CPU usage descending to get the most active processes
@@ -550,10 +545,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let mut count = 0;
         for (pid, proc_) in &process_list {
-            if count >= 25 {
+            if count >= 100 {
                 break;
             }
             let path_str = proc_.exe().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+            let command_line = proc_.cmd().join(" ");
             let hash = if !path_str.is_empty() {
                 compute_sha256(&path_str)
             } else {
@@ -565,6 +561,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 parent_pid: proc_.parent().map(|p| p.as_u32()),
                 name: proc_.name().to_string(),
                 executable_path: path_str,
+                command_line,
                 cpu_pct: proc_.cpu_usage(),
                 memory_mb: proc_.memory() / (1024 * 1024),
                 sha256_hash: hash,

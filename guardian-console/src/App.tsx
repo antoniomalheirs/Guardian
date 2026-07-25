@@ -38,6 +38,7 @@ interface ProcessTelemetry {
   parentPid?: number | null;
   name: string;
   executablePath: string;
+  commandLine?: string;
   cpuPct: number;
   memoryMb: number;
   sha256Hash: string;
@@ -126,19 +127,15 @@ interface EDRAlert {
 }
 
 const API_BASE_URL = import.meta.env.VITE_GUARDIAN_API_URL || 'http://localhost:4000';
-const ADMIN_TOKEN = import.meta.env.VITE_GUARDIAN_ADMIN_TOKEN || '';
-const AGENT_TOKEN = import.meta.env.VITE_GUARDIAN_AGENT_TOKEN || ADMIN_TOKEN;
-
 function guardianFetch(path: string, init: RequestInit = {}) {
-  const headers = new Headers(init.headers || {});
-  if (ADMIN_TOKEN) headers.set('x-guardian-admin-token', ADMIN_TOKEN);
-  return fetch(`${API_BASE_URL}${path}`, { ...init, headers });
+  return fetch(`${API_BASE_URL}${path}`, init);
 }
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<'endpoints' | 'agentless' | 'network_map' | 'mitre_matrix' | 'processes' | 'network' | 'files' | 'rules'>('endpoints');
   const [selectedHostFilter, setSelectedHostFilter] = useState<string>('ALL');
   const [selectedProcessDetails, setSelectedProcessDetails] = useState<ProcessTelemetry | null>(null);
+  const [selectedMitreRuleId, setSelectedMitreRuleId] = useState<string | null>(null);
 
   const [agents, setAgents] = useState<Agent[]>([]);
   const [processes, setProcesses] = useState<ProcessTelemetry[]>([]);
@@ -164,7 +161,7 @@ export default function App() {
   const [showAndroidInstallModal, setShowAndroidInstallModal] = useState(false);
   const [copiedCmd, setCopiedCmd] = useState(false);
 
-  const androidInstallCommand = `pkg install -y curl bash && curl -sSL '${API_BASE_URL}/android.sh${ADMIN_TOKEN ? `?token=${encodeURIComponent(ADMIN_TOKEN)}` : ''}' | GUARDIAN_DOWNLOAD_TOKEN='${ADMIN_TOKEN}' GUARDIAN_AGENT_TOKEN='${AGENT_TOKEN}' bash`;
+  const androidInstallCommand = `pkg install -y curl bash && curl -sSL '${API_BASE_URL}/android.sh' | bash`;
 
   const fetchData = async () => {
     setLoading(true);
@@ -207,7 +204,7 @@ export default function App() {
   useEffect(() => {
     fetchData();
 
-    const eventSource = new EventSource(`${API_BASE_URL}/api/v1/stream${ADMIN_TOKEN ? `?token=${encodeURIComponent(ADMIN_TOKEN)}` : ''}`);
+    const eventSource = new EventSource(`${API_BASE_URL}/api/v1/stream`);
     eventSource.addEventListener('alert', (e) => {
       try {
         const newAlert = JSON.parse((e as MessageEvent).data);
@@ -348,6 +345,21 @@ export default function App() {
   const filteredFiles = selectedHostFilter === 'ALL' 
     ? fileEvents 
     : fileEvents.filter(f => f.agentId === selectedHostFilter || f.hostname === selectedHostFilter);
+
+  const mitreTactics = [
+    { tactic: 'Execution', id: 'TA0002', objective: 'Execução de código e scripts maliciosos', rules: ['RULE-WIN-001', 'RULE-CMD-009', 'RULE-LOL-014', 'RULE-CMDLINE-021'] },
+    { tactic: 'Persistence', id: 'TA0003', objective: 'Sobrevivência após reboot/logon', rules: ['RULE-REG-006', 'RULE-FILE-022', 'RULE-SYS-007'] },
+    { tactic: 'Defense Evasion', id: 'TA0005', objective: 'Mascaramento e abuso de binários confiáveis', rules: ['RULE-PROC-010', 'RULE-MASQ-012', 'RULE-LOL-014'] },
+    { tactic: 'Credential Access', id: 'TA0006', objective: 'Coleta de credenciais e dumping de memória', rules: ['RULE-MEM-005', 'RULE-FINDING-019'] },
+    { tactic: 'Command & Control', id: 'TA0011', objective: 'Beaconing, túnel DNS e sockets suspeitos', rules: ['RULE-NET-003', 'RULE-NET-008', 'RULE-BEACON-015'] },
+    { tactic: 'Impact / Exfil', id: 'TA0040', objective: 'Ransomware, exfiltração e degradação', rules: ['RULE-FILE-002', 'RULE-RES-004', 'RULE-EXFIL-016', 'RULE-MINER-017', 'RULE-YARA-020'] },
+  ];
+  const selectedMitreRule = selectedMitreRuleId ? rules.find((r) => r.ruleId === selectedMitreRuleId) : null;
+  const selectedMitreAlerts = selectedMitreRuleId ? alerts.filter((a) => a.ruleId === selectedMitreRuleId) : [];
+  const mitreRuleIds = new Set(mitreTactics.flatMap((t) => t.rules));
+  const mitreCoveredRules = rules.filter((r) => mitreRuleIds.has(r.ruleId)).length;
+  const activeMitreAlerts = alerts.filter((a) => mitreRuleIds.has(a.ruleId));
+  const mitreHosts = new Set(activeMitreAlerts.map((a) => a.hostname));
 
   return (
     <div style={{ padding: '24px 32px', maxWidth: '1600px', margin: '0 auto' }}>
@@ -778,7 +790,7 @@ export default function App() {
                       </td>
                       <td className="mono-text" style={{ padding: '12px', color: 'var(--accent-cyan)', fontWeight: 700 }}>{proc.pid}</td>
                       <td style={{ padding: '12px', fontWeight: 700, color: '#fff' }}>{proc.name}</td>
-                      <td className="mono-text" style={{ padding: '12px', color: 'var(--text-secondary)', fontSize: '0.75rem' }}>{proc.executablePath || 'N/A (Kernel/System)'}</td>
+                      <td className="mono-text" style={{ padding: '12px', color: 'var(--text-secondary)', fontSize: '0.75rem' }}>{proc.commandLine || proc.executablePath || 'N/A (Kernel/System)'}</td>
                       <td style={{ padding: '12px', color: proc.cpuPct > 50 ? '#f87171' : '#34d399' }}>{(proc.cpuPct || 0).toFixed(1)}%</td>
                       <td style={{ padding: '12px', color: '#fff' }}>{proc.memoryMb} MB</td>
                       <td className="mono-text" style={{ padding: '12px', color: 'var(--text-muted)', fontSize: '0.7rem' }}>
@@ -1109,65 +1121,60 @@ export default function App() {
       {activeTab === 'mitre_matrix' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
           <div className="glass-panel" style={{ padding: '24px', background: 'linear-gradient(135deg, rgba(244, 63, 94, 0.08), rgba(225, 29, 72, 0.08))', border: '1px solid rgba(244, 63, 94, 0.3)' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '20px', flexWrap: 'wrap' }}>
               <div>
-                <h2 style={{ fontSize: '1.2rem', fontWeight: 800, color: '#ffffff', display: 'flex', alignItems: 'center', gap: '10px' }}>
-                  <Layers size={24} color="#f43f5e" /> Matriz de Táticas e Técnicas MITRE ATT&CK
-                </h2>
-                <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
-                  Mapeamento em tempo real do ecossistema de detecção contra o framework MITRE ATT&CK v14.
-                </p>
+                <h2 style={{ fontSize: '1.2rem', fontWeight: 800, color: '#ffffff', display: 'flex', alignItems: 'center', gap: '10px' }}><Layers size={24} color="#f43f5e" /> Matriz de Táticas e Técnicas MITRE ATT&CK</h2>
+                <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginTop: '4px' }}>Clique em uma técnica para ver regra, severidade, hosts afetados, últimas detecções e evidências do alerta.</p>
               </div>
-              <span className="badge badge-critical" style={{ fontSize: '0.85rem', padding: '6px 14px' }}>
-                <AlertTriangle size={14} /> {alerts.length} Detecções Registradas
-              </span>
+              <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+                <span className="badge badge-critical" style={{ fontSize: '0.85rem', padding: '6px 14px' }}><AlertTriangle size={14} /> {activeMitreAlerts.length} Detecções</span>
+                <span className="badge" style={{ background: 'rgba(6, 182, 212, 0.15)', color: 'var(--accent-cyan)', border: '1px solid rgba(6, 182, 212, 0.35)' }}>{mitreCoveredRules}/{rules.length || 1} Regras Mapeadas</span>
+                <span className="badge" style={{ background: 'rgba(16, 185, 129, 0.15)', color: '#34d399', border: '1px solid rgba(16, 185, 129, 0.35)' }}>{mitreHosts.size} Hosts com Hits</span>
+              </div>
             </div>
           </div>
-
-          {/* ATT&CK Matrix Grid */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: '16px', overflowX: 'auto' }}>
-            {[
-              { tactic: 'Execution', id: 'TA0002', rules: ['RULE-WIN-001', 'RULE-CMD-009', 'RULE-LOL-014'] },
-              { tactic: 'Persistence', id: 'TA0003', rules: ['RULE-REG-006', 'RULE-SYS-007'] },
-              { tactic: 'Defense Evasion', id: 'TA0005', rules: ['RULE-PROC-010', 'RULE-MASQ-012'] },
-              { tactic: 'Credential Access', id: 'TA0006', rules: ['RULE-MEM-005'] },
-              { tactic: 'Command & Control', id: 'TA0011', rules: ['RULE-NET-003', 'RULE-NET-008', 'RULE-BEACON-015'] },
-              { tactic: 'Impact / Exfil', id: 'TA0040', rules: ['RULE-FILE-002', 'RULE-RES-004', 'RULE-EXFIL-016', 'RULE-MINER-017'] },
-            ].map((col) => (
-              <div key={col.id} className="glass-panel" style={{ padding: '16px', background: 'rgba(15, 23, 42, 0.6)' }}>
-                <div style={{ borderBottom: '2px solid #f43f5e', paddingBottom: '10px', marginBottom: '14px' }}>
-                  <h4 style={{ color: '#fff', fontWeight: 800, fontSize: '0.9rem' }}>{col.tactic}</h4>
-                  <span className="mono-text" style={{ fontSize: '0.7rem', color: '#f43f5e' }}>{col.id}</span>
+          <div style={{ display: 'grid', gridTemplateColumns: 'minmax(720px, 2fr) minmax(360px, 1fr)', gap: '16px', alignItems: 'start' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, minmax(170px, 1fr))', gap: '16px', overflowX: 'auto' }}>
+              {mitreTactics.map((col) => {
+                const tacticHits = alerts.filter((a) => col.rules.includes(a.ruleId));
+                return (
+                  <div key={col.id} className="glass-panel" style={{ padding: '16px', background: 'rgba(15, 23, 42, 0.6)' }}>
+                    <div style={{ borderBottom: '2px solid #f43f5e', paddingBottom: '10px', marginBottom: '14px' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px' }}><h4 style={{ color: '#fff', fontWeight: 800, fontSize: '0.9rem' }}>{col.tactic}</h4><span className="badge" style={{ background: tacticHits.length ? 'rgba(244, 63, 94, 0.2)' : 'rgba(255,255,255,0.05)', color: tacticHits.length ? '#f87171' : '#94a3b8', fontSize: '0.62rem' }}>{tacticHits.length} hits</span></div>
+                      <span className="mono-text" style={{ fontSize: '0.7rem', color: '#f43f5e' }}>{col.id}</span>
+                      <p style={{ fontSize: '0.68rem', color: 'var(--text-muted)', marginTop: '6px', lineHeight: 1.35 }}>{col.objective}</p>
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                      {col.rules.map((ruleId) => {
+                        const ruleDef = rules.find((r) => r.ruleId === ruleId);
+                        const ruleAlerts = alerts.filter((a) => a.ruleId === ruleId);
+                        const hitCount = ruleAlerts.length;
+                        const lastHit = ruleAlerts[0];
+                        const isSelected = selectedMitreRuleId === ruleId;
+                        return (
+                          <button key={ruleId} onClick={() => setSelectedMitreRuleId(ruleId)} style={{ textAlign: 'left', cursor: 'pointer', background: hitCount > 0 ? 'rgba(244, 63, 94, 0.15)' : isSelected ? 'rgba(6, 182, 212, 0.14)' : 'rgba(255, 255, 255, 0.03)', border: isSelected ? '1px solid var(--accent-cyan)' : hitCount > 0 ? '1px solid #f43f5e' : '1px solid rgba(255, 255, 255, 0.08)', padding: '10px', borderRadius: '8px', color: '#fff' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px', gap: '8px' }}><span className="mono-text" style={{ fontSize: '0.7rem', color: hitCount > 0 ? '#f43f5e' : 'var(--accent-cyan)', fontWeight: 700 }}>{ruleId}</span>{hitCount > 0 && <span className="badge badge-critical" style={{ fontSize: '0.62rem' }}>{hitCount}</span>}</div>
+                            <div style={{ fontSize: '0.75rem', color: '#fff', fontWeight: 700, lineHeight: 1.35 }}>{ruleDef?.name || ruleId}</div>
+                            <div style={{ marginTop: '6px', display: 'flex', justifyContent: 'space-between', gap: '8px', color: 'var(--text-muted)', fontSize: '0.65rem' }}><span>{ruleDef?.severity || 'N/A'}</span><span>{lastHit ? new Date(lastHit.timestamp).toLocaleTimeString() : 'sem hit'}</span></div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="glass-panel" style={{ padding: '20px', position: 'sticky', top: '16px', border: selectedMitreAlerts.length ? '1px solid rgba(244, 63, 94, 0.35)' : '1px solid var(--border-glass)' }}>
+              {selectedMitreRuleId ? (<>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '12px', marginBottom: '14px' }}><div><span className="mono-text" style={{ color: 'var(--accent-cyan)', fontSize: '0.78rem', fontWeight: 800 }}>{selectedMitreRuleId}</span><h3 style={{ color: '#fff', fontSize: '1.05rem', fontWeight: 800, marginTop: '4px' }}>{selectedMitreRule?.name || 'Regra não encontrada no catálogo'}</h3></div><span className={`badge ${selectedMitreRule?.severity === 'CRITICAL' ? 'badge-critical' : selectedMitreRule?.severity === 'HIGH' ? 'badge-warning' : 'badge-online'}`}>{selectedMitreRule?.severity || 'N/A'}</span></div>
+                <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', lineHeight: 1.5, marginBottom: '16px' }}>{selectedMitreRule?.description || 'Sem descrição cadastrada para esta técnica.'}</p>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '16px' }}><div style={{ background: 'rgba(0,0,0,0.25)', padding: '12px', borderRadius: '10px' }}><div style={{ color: 'var(--text-muted)', fontSize: '0.7rem' }}>Detecções</div><strong style={{ color: selectedMitreAlerts.length ? '#f87171' : '#34d399', fontSize: '1.35rem' }}>{selectedMitreAlerts.length}</strong></div><div style={{ background: 'rgba(0,0,0,0.25)', padding: '12px', borderRadius: '10px' }}><div style={{ color: 'var(--text-muted)', fontSize: '0.7rem' }}>Hosts Afetados</div><strong style={{ color: '#38bdf8', fontSize: '1.35rem' }}>{new Set(selectedMitreAlerts.map((a) => a.hostname)).size}</strong></div></div>
+                <h4 style={{ color: '#fff', fontWeight: 800, fontSize: '0.85rem', marginBottom: '10px' }}>Últimas evidências</h4>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', maxHeight: '430px', overflowY: 'auto' }}>
+                  {selectedMitreAlerts.length === 0 ? (<div style={{ border: '1px dashed rgba(255,255,255,0.12)', borderRadius: '10px', padding: '14px', color: 'var(--text-secondary)', fontSize: '0.8rem' }}>Nenhuma detecção para esta técnica ainda. A regra está pronta para alertar quando a telemetria chegar.</div>) : selectedMitreAlerts.slice(0, 8).map((alert) => (<div key={alert.alertId} style={{ background: 'rgba(0,0,0,0.28)', border: '1px solid rgba(244, 63, 94, 0.22)', borderRadius: '10px', padding: '12px' }}><div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px', marginBottom: '6px' }}><strong style={{ color: '#fff', fontSize: '0.82rem' }}>{alert.hostname}</strong><span className="mono-text" style={{ color: 'var(--text-muted)', fontSize: '0.68rem' }}>{new Date(alert.timestamp).toLocaleString()}</span></div><p style={{ color: 'var(--text-secondary)', fontSize: '0.76rem', lineHeight: 1.45, wordBreak: 'break-word' }}>{alert.details}</p><div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '8px', color: 'var(--text-muted)', fontSize: '0.68rem' }}><span>{alert.status}</span><span className="mono-text">{alert.alertId}</span></div></div>))}
                 </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                  {col.rules.map((ruleId) => {
-                    const ruleDef = rules.find((r) => r.ruleId === ruleId);
-                    const hitCount = alerts.filter((a) => a.ruleId === ruleId).length;
-                    return (
-                      <div key={ruleId} style={{ 
-                        background: hitCount > 0 ? 'rgba(244, 63, 94, 0.15)' : 'rgba(255, 255, 255, 0.03)',
-                        border: hitCount > 0 ? '1px solid #f43f5e' : '1px solid rgba(255, 255, 255, 0.08)',
-                        padding: '10px', borderRadius: '8px'
-                      }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
-                          <span className="mono-text" style={{ fontSize: '0.7rem', color: hitCount > 0 ? '#f43f5e' : '#94a3b8', fontWeight: 700 }}>
-                            {ruleId}
-                          </span>
-                          {hitCount > 0 && (
-                            <span className="badge badge-critical" style={{ fontSize: '0.65rem' }}>
-                              {hitCount} HITS
-                            </span>
-                          )}
-                        </div>
-                        <div style={{ fontSize: '0.75rem', color: '#fff', fontWeight: 600 }}>
-                          {ruleDef?.name || ruleId}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            ))}
+              </>) : (<div style={{ textAlign: 'center', padding: '32px 12px', color: 'var(--text-secondary)' }}><Info size={34} color="var(--accent-cyan)" style={{ marginBottom: '10px' }} /><h3 style={{ color: '#fff', fontWeight: 800, marginBottom: '8px' }}>Selecione uma técnica</h3><p style={{ fontSize: '0.82rem', lineHeight: 1.5 }}>Clique em qualquer card da matriz para abrir detalhes operacionais, contadores, hosts impactados e evidências dos alertas.</p></div>)}
+            </div>
           </div>
         </div>
       )}
@@ -1261,7 +1268,7 @@ export default function App() {
                     <span className="mono-text" style={{ color: '#38bdf8' }}>{selectedProcessDetails.cpuPct.toFixed(1)}% CPU</span>
                   </div>
                   <div className="mono-text" style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
-                    {selectedProcessDetails.executablePath}
+                    {selectedProcessDetails.commandLine || selectedProcessDetails.executablePath}
                   </div>
                 </div>
 
