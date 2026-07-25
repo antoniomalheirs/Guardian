@@ -8,6 +8,36 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 Set-Location $ScriptDir
 $ApiPort = if ($env:GUARDIAN_API_PORT) { $env:GUARDIAN_API_PORT } else { "4000" }
 $ConsolePort = if ($env:GUARDIAN_CONSOLE_PORT) { $env:GUARDIAN_CONSOLE_PORT } else { "4001" }
+$SecretsFile = Join-Path $ScriptDir ".guardian-secrets.ps1"
+
+
+function New-GuardianToken {
+    $bytes = [byte[]]::new(32)
+    [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+    return ([BitConverter]::ToString($bytes) -replace '-', '').ToLowerInvariant()
+}
+
+function Initialize-GuardianSecrets {
+    if (Test-Path $SecretsFile) {
+        . $SecretsFile
+    }
+    $changed = $false
+    if (-not $env:GUARDIAN_ADMIN_TOKEN) {
+        $env:GUARDIAN_ADMIN_TOKEN = New-GuardianToken
+        $changed = $true
+    }
+    if (-not $env:GUARDIAN_AGENT_TOKEN) {
+        $env:GUARDIAN_AGENT_TOKEN = New-GuardianToken
+        $changed = $true
+    }
+    if ($changed -or -not (Test-Path $SecretsFile)) {
+        @"
+`$env:GUARDIAN_ADMIN_TOKEN = "$($env:GUARDIAN_ADMIN_TOKEN)"
+`$env:GUARDIAN_AGENT_TOKEN = "$($env:GUARDIAN_AGENT_TOKEN)"
+"@ | Set-Content -Path $SecretsFile -Encoding UTF8
+        Write-Host "       Segredos Guardian salvos em $SecretsFile" -ForegroundColor Green
+    }
+}
 
 # 0. Detect Dynamic Host IP Address
 $LocalIP = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object {
@@ -48,6 +78,8 @@ if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
+Initialize-GuardianSecrets
+
 # Instalar dependências quando node_modules ainda não existe
 foreach ($Project in @("guardian-core", "guardian-console")) {
     $ProjectDir = Join-Path $ScriptDir $Project
@@ -78,7 +110,16 @@ Write-Host "       Guardian Core API compilado com sucesso." -ForegroundColor Gr
 # 3. Compilar Guardian Console Web (React/Vite)
 Write-Host "[3/5] Compilando Guardian Console Web (Frontend)..." -ForegroundColor Yellow
 Set-Location "$ScriptDir\guardian-console"
+$previousViteApiUrl = $env:VITE_GUARDIAN_API_URL
+$previousViteAdminToken = $env:VITE_GUARDIAN_ADMIN_TOKEN
+$previousViteAgentToken = $env:VITE_GUARDIAN_AGENT_TOKEN
+$env:VITE_GUARDIAN_API_URL = $ServerUrl
+$env:VITE_GUARDIAN_ADMIN_TOKEN = $env:GUARDIAN_ADMIN_TOKEN
+$env:VITE_GUARDIAN_AGENT_TOKEN = $env:GUARDIAN_AGENT_TOKEN
 $buildConsole = & npm run build 2>&1
+$env:VITE_GUARDIAN_API_URL = $previousViteApiUrl
+$env:VITE_GUARDIAN_ADMIN_TOKEN = $previousViteAdminToken
+$env:VITE_GUARDIAN_AGENT_TOKEN = $previousViteAgentToken
 if ($LASTEXITCODE -ne 0) {
     Write-Host "[AVISO] Falha no build de produção do Console. Usando modo Dev Vite..." -ForegroundColor Yellow
 } else {
@@ -91,6 +132,9 @@ $PreviousPort = $env:PORT
 $env:PORT = $ApiPort
 Start-Process node -ArgumentList "`"$ScriptDir\guardian-core\dist\index.js`"" -WorkingDirectory "$ScriptDir\guardian-core" -WindowStyle Hidden
 $env:PORT = $PreviousPort
+$env:VITE_GUARDIAN_API_URL = $ServerUrl
+$env:VITE_GUARDIAN_ADMIN_TOKEN = $env:GUARDIAN_ADMIN_TOKEN
+$env:VITE_GUARDIAN_AGENT_TOKEN = $env:GUARDIAN_AGENT_TOKEN
 Start-Process cmd.exe -ArgumentList "/c", "npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", $ConsolePort -WorkingDirectory "$ScriptDir\guardian-console" -WindowStyle Hidden
 
 # 5. Iniciar Agente EDR Local (Rust Agent para Windows)
@@ -147,6 +191,6 @@ Write-Host " 🛡️ API Core Server:      $ServerUrl" -ForegroundColor Cyan
 Write-Host " 🗄️ Banco de Dados:        SQLite ($dbPath)" -ForegroundColor Cyan
 Write-Host "----------------------------------------------------------------------" -ForegroundColor DarkGray
 Write-Host " 📱 COMANDO DE INSTALAÇÃO AUTOMÁTICA NO ANDROID (TERMUX):" -ForegroundColor Yellow
-Write-Host "    pkg install -y curl bash && curl -sSL $ServerUrl/android.sh | bash" -ForegroundColor White
+Write-Host "    pkg install -y curl bash && curl -sSL $ServerUrl/android.sh?token=$($env:GUARDIAN_ADMIN_TOKEN) | GUARDIAN_DOWNLOAD_TOKEN=$($env:GUARDIAN_ADMIN_TOKEN) GUARDIAN_AGENT_TOKEN=$($env:GUARDIAN_AGENT_TOKEN) bash" -ForegroundColor White
 Write-Host "======================================================================" -ForegroundColor Green
 Write-Host ""

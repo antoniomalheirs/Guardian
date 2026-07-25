@@ -20,10 +20,13 @@ const MAX_CONNECTIONS_PER_HEARTBEAT = Number(process.env.GUARDIAN_MAX_CONNECTION
 const MAX_FILE_EVENTS_PER_HEARTBEAT = Number(process.env.GUARDIAN_MAX_FILE_EVENTS || 250);
 const ALERT_DEDUP_WINDOW_MS = Number(process.env.GUARDIAN_ALERT_DEDUP_WINDOW_MS || 5 * 60 * 1000);
 const ADMIN_API_TOKEN = process.env.GUARDIAN_ADMIN_TOKEN || '';
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+const DEFAULT_AGENT_TOKEN = 'GUARDIAN-SECRET-AGENT-KEY-v0.9';
+const REQUIRE_ADMIN_TOKEN = process.env.GUARDIAN_REQUIRE_ADMIN_TOKEN === 'true' || IS_PRODUCTION;
 const execAsync = (0, util_1.promisify)(child_process_1.exec);
 const isWindows = process.platform === 'win32';
 app.use((0, cors_1.default)());
-app.use(express_1.default.json());
+app.use(express_1.default.json({ limit: process.env.GUARDIAN_JSON_LIMIT || '1mb' }));
 // State Holders (SQL Backed)
 let agents = new Map();
 let eventsHistory = [];
@@ -286,9 +289,13 @@ function broadcastSSE(event, data) {
 }
 // Security Token Authentication Middleware
 function verifyAdminToken(req, res, next) {
-    if (!ADMIN_API_TOKEN)
+    if (!ADMIN_API_TOKEN) {
+        if (REQUIRE_ADMIN_TOKEN) {
+            return res.status(503).json({ error: 'Admin API token is required. Set GUARDIAN_ADMIN_TOKEN before exposing this service.' });
+        }
         return next();
-    const token = req.headers['x-guardian-admin-token'] || req.headers['x-guardian-token'];
+    }
+    const token = req.headers['x-guardian-admin-token'] || req.headers['x-guardian-token'] || req.query.token;
     if (typeof token !== 'string' || token !== ADMIN_API_TOKEN) {
         return res.status(401).json({ error: 'Unauthorized: invalid or missing admin token' });
     }
@@ -312,6 +319,9 @@ function consumeAgentCommands(agentId) {
     return commands;
 }
 function verifyAgentToken(req, res, next) {
+    if (IS_PRODUCTION && VALID_AGENT_TOKEN === DEFAULT_AGENT_TOKEN) {
+        return res.status(503).json({ error: 'Agent token must be changed before production use. Set GUARDIAN_AGENT_TOKEN.' });
+    }
     const token = req.headers['x-guardian-token'];
     if (typeof token !== 'string' || token !== VALID_AGENT_TOKEN) {
         console.warn(`🔒 Unauthorized agent request blocked from IP ${req.ip}.`);
@@ -368,6 +378,20 @@ function normalizeTelemetry(raw) {
         fileEvents,
         securityFindings: asArray(readField(raw, 'securityFindings', 'security_findings', []), 100),
     };
+}
+function clampNumber(value, min, max) {
+    if (!Number.isFinite(value))
+        return min;
+    return Math.min(max, Math.max(min, value));
+}
+function validateTelemetryPayload(payload) {
+    if (!payload.agentId || typeof payload.agentId !== 'string' || payload.agentId.length > 128)
+        return 'agentId is required and must be <= 128 characters';
+    payload.cpuUsagePct = clampNumber(payload.cpuUsagePct, 0, 100);
+    payload.memoryUsagePct = clampNumber(payload.memoryUsagePct, 0, 100);
+    payload.diskUsagePct = clampNumber(payload.diskUsagePct, 0, 100);
+    payload.activeProcessesCount = clampNumber(payload.activeProcessesCount, 0, 1_000_000);
+    return null;
 }
 function runCommand(command, timeout = 10000) {
     return execAsync(command, { timeout, windowsHide: true })
@@ -795,7 +819,7 @@ app.post('/api/v1/network/scan', verifyAdminToken, async (req, res) => {
     }
 });
 // GET /api/v1/network/scan/latest
-app.get('/api/v1/network/scan/latest', async (_req, res) => {
+app.get('/api/v1/network/scan/latest', verifyAdminToken, async (_req, res) => {
     try {
         if (discoveredDevices.length === 0) {
             discoveredDevices = await (0, db_js_1.loadDiscoveredDevicesFromDb)();
@@ -878,19 +902,19 @@ const handleAgentDownload = (_req, res) => {
         res.status(404).send('Agent script file not found on server');
     }
 };
-app.get('/download/agent.py', handleAgentDownload);
-app.get('/download/agent', handleAgentDownload);
-app.get('/agent.py', handleAgentDownload);
-app.get('/download/install.sh', handleInstallScriptDownload);
-app.get('/download/android.sh', handleInstallScriptDownload);
-app.get('/download/install', handleInstallScriptDownload);
-app.get('/download/android', handleInstallScriptDownload);
-app.get('/install.sh', handleInstallScriptDownload);
-app.get('/android.sh', handleInstallScriptDownload);
-app.get('/install', handleInstallScriptDownload);
-app.get('/android', handleInstallScriptDownload);
+app.get('/download/agent.py', verifyAdminToken, handleAgentDownload);
+app.get('/download/agent', verifyAdminToken, handleAgentDownload);
+app.get('/agent.py', verifyAdminToken, handleAgentDownload);
+app.get('/download/install.sh', verifyAdminToken, handleInstallScriptDownload);
+app.get('/download/android.sh', verifyAdminToken, handleInstallScriptDownload);
+app.get('/download/install', verifyAdminToken, handleInstallScriptDownload);
+app.get('/download/android', verifyAdminToken, handleInstallScriptDownload);
+app.get('/install.sh', verifyAdminToken, handleInstallScriptDownload);
+app.get('/android.sh', verifyAdminToken, handleInstallScriptDownload);
+app.get('/install', verifyAdminToken, handleInstallScriptDownload);
+app.get('/android', verifyAdminToken, handleInstallScriptDownload);
 // GET /api/v1/stream (Server-Sent Events Real-Time Live Feed)
-app.get('/api/v1/stream', (req, res) => {
+app.get('/api/v1/stream', verifyAdminToken, (req, res) => {
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
@@ -907,13 +931,15 @@ app.get('/api/v1/health', (_req, res) => {
         service: 'Guardian Core Server',
         detectedSubnets: getLocalSubnets(),
         databaseConnected: (0, db_js_1.isDbConnected)(),
+        adminAuthConfigured: Boolean(ADMIN_API_TOKEN),
+        agentTokenUsesDefault: VALID_AGENT_TOKEN === DEFAULT_AGENT_TOKEN,
         agentlessScannerActive: true,
         rulesCount: activeRules.length,
         timestamp: new Date().toISOString()
     });
 });
 // GET /api/v1/stats
-app.get('/api/v1/stats', (_req, res) => {
+app.get('/api/v1/stats', verifyAdminToken, (_req, res) => {
     const allAgents = Array.from(agents.values());
     const total = allAgents.length;
     const online = allAgents.filter((a) => a.status === 'online').length;
@@ -929,7 +955,7 @@ app.get('/api/v1/stats', (_req, res) => {
     });
 });
 // GET /api/v1/agents
-app.get('/api/v1/agents', (_req, res) => {
+app.get('/api/v1/agents', verifyAdminToken, (_req, res) => {
     const now = Date.now();
     const agentList = [];
     for (const ag of agents.values()) {
@@ -949,7 +975,7 @@ app.get('/api/v1/agents', (_req, res) => {
     res.json(agentList);
 });
 // GET /api/v1/processes (ONLY LIVE ONLINE AGENTS)
-app.get('/api/v1/processes', (_req, res) => {
+app.get('/api/v1/processes', verifyAdminToken, (_req, res) => {
     const now = Date.now();
     const allProcesses = [];
     for (const agent of agents.values()) {
@@ -968,7 +994,7 @@ app.get('/api/v1/processes', (_req, res) => {
     res.json(allProcesses);
 });
 // GET /api/v1/network (ONLY LIVE ONLINE AGENTS)
-app.get('/api/v1/network', (_req, res) => {
+app.get('/api/v1/network', verifyAdminToken, (_req, res) => {
     const now = Date.now();
     const allConnections = [];
     for (const agent of agents.values()) {
@@ -987,7 +1013,7 @@ app.get('/api/v1/network', (_req, res) => {
     res.json(allConnections);
 });
 // GET /api/v1/files (ONLY LIVE ONLINE AGENTS)
-app.get('/api/v1/files', (_req, res) => {
+app.get('/api/v1/files', verifyAdminToken, (_req, res) => {
     const now = Date.now();
     const allFiles = [];
     for (const agent of agents.values()) {
@@ -1006,15 +1032,15 @@ app.get('/api/v1/files', (_req, res) => {
     res.json(allFiles);
 });
 // GET /api/v1/rules
-app.get('/api/v1/rules', (_req, res) => {
+app.get('/api/v1/rules', verifyAdminToken, (_req, res) => {
     res.json(activeRules);
 });
 // GET /api/v1/yara/rules
-app.get('/api/v1/yara/rules', (_req, res) => {
+app.get('/api/v1/yara/rules', verifyAdminToken, (_req, res) => {
     res.json(builtInYaraRules);
 });
 // GET /api/v1/alerts
-app.get('/api/v1/alerts', (_req, res) => {
+app.get('/api/v1/alerts', verifyAdminToken, (_req, res) => {
     res.json(alertsHistory);
 });
 // POST /api/v1/rules/create
@@ -1104,8 +1130,9 @@ app.post('/api/v1/agents/register', verifyAgentToken, async (req, res) => {
 // POST /api/v1/agents/heartbeat (Protected by verifyAgentToken & EVALUATES MITRE ATT&CK RULES)
 app.post('/api/v1/agents/heartbeat', verifyAgentToken, async (req, res) => {
     const payload = normalizeTelemetry(req.body);
-    if (!payload.agentId || typeof payload.agentId !== 'string') {
-        return res.status(400).json({ error: 'agentId is required' });
+    const validationError = validateTelemetryPayload(payload);
+    if (validationError) {
+        return res.status(400).json({ error: validationError });
     }
     let agent = agents.get(payload.agentId);
     if (!agent) {
