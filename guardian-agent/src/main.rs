@@ -5,7 +5,6 @@ use std::path::Path;
 use std::net::UdpSocket;
 use std::time::Duration;
 use std::collections::HashMap;
-use reqwest::header::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sysinfo::System;
@@ -503,13 +502,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("📋 OS: {} {} | CPU: {} | RAM: {}MB",
              inventory.os_name, inventory.os_version, inventory.cpu_model, inventory.total_memory_mb);
 
-    // HTTP Client with Security Headers
-    let mut headers = HeaderMap::new();
-    headers.insert("x-guardian-token", HeaderValue::from_static("GUARDIAN-SECRET-AGENT-KEY-v0.9"));
-
-    let client = reqwest::Client::builder()
-        .default_headers(headers)
-        .build()?;
+    // HTTP client without authentication headers for open local lab connectivity.
+    let client = reqwest::Client::builder().build()?;
 
     let register_url = format!("{}/api/v1/agents/register", base_server_url);
     println!("📡 Registering with Guardian Core at {}...", register_url);

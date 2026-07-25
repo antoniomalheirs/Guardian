@@ -14,15 +14,10 @@ const util_1 = require("util");
 const db_js_1 = require("./db.js");
 const app = (0, express_1.default)();
 const PORT = process.env.PORT || 4000;
-const VALID_AGENT_TOKEN = process.env.GUARDIAN_AGENT_TOKEN || 'GUARDIAN-SECRET-AGENT-KEY-v0.9';
 const MAX_PROCESSES_PER_HEARTBEAT = Number(process.env.GUARDIAN_MAX_PROCESSES || 500);
 const MAX_CONNECTIONS_PER_HEARTBEAT = Number(process.env.GUARDIAN_MAX_CONNECTIONS || 500);
 const MAX_FILE_EVENTS_PER_HEARTBEAT = Number(process.env.GUARDIAN_MAX_FILE_EVENTS || 250);
 const ALERT_DEDUP_WINDOW_MS = Number(process.env.GUARDIAN_ALERT_DEDUP_WINDOW_MS || 5 * 60 * 1000);
-const ADMIN_API_TOKEN = process.env.GUARDIAN_ADMIN_TOKEN || '';
-const IS_PRODUCTION = process.env.NODE_ENV === 'production';
-const DEFAULT_AGENT_TOKEN = 'GUARDIAN-SECRET-AGENT-KEY-v0.9';
-const REQUIRE_ADMIN_TOKEN = process.env.GUARDIAN_REQUIRE_ADMIN_TOKEN === 'true' || IS_PRODUCTION;
 const execAsync = (0, util_1.promisify)(child_process_1.exec);
 const isWindows = process.platform === 'win32';
 app.use((0, cors_1.default)());
@@ -287,18 +282,9 @@ function broadcastSSE(event, data) {
         }
     });
 }
-// Security Token Authentication Middleware
-function verifyAdminToken(req, res, next) {
-    if (!ADMIN_API_TOKEN) {
-        if (REQUIRE_ADMIN_TOKEN) {
-            return res.status(503).json({ error: 'Admin API token is required. Set GUARDIAN_ADMIN_TOKEN before exposing this service.' });
-        }
-        return next();
-    }
-    const token = req.headers['x-guardian-admin-token'] || req.headers['x-guardian-token'] || req.query.token;
-    if (typeof token !== 'string' || token !== ADMIN_API_TOKEN) {
-        return res.status(401).json({ error: 'Unauthorized: invalid or missing admin token' });
-    }
+// Authentication is intentionally disabled so local agents, desktops, and
+// agentless devices can reconnect without sharing tokens in lab deployments.
+function allowUnauthenticated(_req, _res, next) {
     next();
 }
 function queueAgentCommand(agentId, type, payload) {
@@ -317,17 +303,6 @@ function consumeAgentCommands(agentId) {
     const commands = pendingCommands.get(agentId) || [];
     pendingCommands.delete(agentId);
     return commands;
-}
-function verifyAgentToken(req, res, next) {
-    if (IS_PRODUCTION && VALID_AGENT_TOKEN === DEFAULT_AGENT_TOKEN) {
-        return res.status(503).json({ error: 'Agent token must be changed before production use. Set GUARDIAN_AGENT_TOKEN.' });
-    }
-    const token = req.headers['x-guardian-token'];
-    if (typeof token !== 'string' || token !== VALID_AGENT_TOKEN) {
-        console.warn(`🔒 Unauthorized agent request blocked from IP ${req.ip}.`);
-        return res.status(401).json({ error: 'Unauthorized: Invalid or missing x-guardian-token header' });
-    }
-    next();
 }
 function isRuleEnabled(ruleId) {
     return activeRules.find((rule) => rule.ruleId === ruleId)?.enabled !== false;
@@ -796,7 +771,7 @@ async function performDeepNetworkDiscovery(targetSubnet) {
     return discovered;
 }
 // POST /api/v1/network/scan (Deep Network Discovery Engine)
-app.post('/api/v1/network/scan', verifyAdminToken, async (req, res) => {
+app.post('/api/v1/network/scan', allowUnauthenticated, async (req, res) => {
     try {
         const detectedSubnets = getLocalSubnets();
         const requestedSubnet = req.body?.subnet;
@@ -819,7 +794,7 @@ app.post('/api/v1/network/scan', verifyAdminToken, async (req, res) => {
     }
 });
 // GET /api/v1/network/scan/latest
-app.get('/api/v1/network/scan/latest', verifyAdminToken, async (_req, res) => {
+app.get('/api/v1/network/scan/latest', allowUnauthenticated, async (_req, res) => {
     try {
         if (discoveredDevices.length === 0) {
             discoveredDevices = await (0, db_js_1.loadDiscoveredDevicesFromDb)();
@@ -903,19 +878,19 @@ const handleAgentDownload = (_req, res) => {
         res.status(404).send('Agent script file not found on server');
     }
 };
-app.get('/download/agent.py', verifyAdminToken, handleAgentDownload);
-app.get('/download/agent', verifyAdminToken, handleAgentDownload);
-app.get('/agent.py', verifyAdminToken, handleAgentDownload);
-app.get('/download/install.sh', verifyAdminToken, handleInstallScriptDownload);
-app.get('/download/android.sh', verifyAdminToken, handleInstallScriptDownload);
-app.get('/download/install', verifyAdminToken, handleInstallScriptDownload);
-app.get('/download/android', verifyAdminToken, handleInstallScriptDownload);
-app.get('/install.sh', verifyAdminToken, handleInstallScriptDownload);
-app.get('/android.sh', verifyAdminToken, handleInstallScriptDownload);
-app.get('/install', verifyAdminToken, handleInstallScriptDownload);
-app.get('/android', verifyAdminToken, handleInstallScriptDownload);
+app.get('/download/agent.py', allowUnauthenticated, handleAgentDownload);
+app.get('/download/agent', allowUnauthenticated, handleAgentDownload);
+app.get('/agent.py', allowUnauthenticated, handleAgentDownload);
+app.get('/download/install.sh', allowUnauthenticated, handleInstallScriptDownload);
+app.get('/download/android.sh', allowUnauthenticated, handleInstallScriptDownload);
+app.get('/download/install', allowUnauthenticated, handleInstallScriptDownload);
+app.get('/download/android', allowUnauthenticated, handleInstallScriptDownload);
+app.get('/install.sh', allowUnauthenticated, handleInstallScriptDownload);
+app.get('/android.sh', allowUnauthenticated, handleInstallScriptDownload);
+app.get('/install', allowUnauthenticated, handleInstallScriptDownload);
+app.get('/android', allowUnauthenticated, handleInstallScriptDownload);
 // GET /api/v1/stream (Server-Sent Events Real-Time Live Feed)
-app.get('/api/v1/stream', verifyAdminToken, (req, res) => {
+app.get('/api/v1/stream', allowUnauthenticated, (req, res) => {
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
@@ -932,15 +907,14 @@ app.get('/api/v1/health', (_req, res) => {
         service: 'Guardian Core Server',
         detectedSubnets: getLocalSubnets(),
         databaseConnected: (0, db_js_1.isDbConnected)(),
-        adminAuthConfigured: Boolean(ADMIN_API_TOKEN),
-        agentTokenUsesDefault: VALID_AGENT_TOKEN === DEFAULT_AGENT_TOKEN,
+        authenticationEnabled: false,
         agentlessScannerActive: true,
         rulesCount: activeRules.length,
         timestamp: new Date().toISOString()
     });
 });
 // GET /api/v1/stats
-app.get('/api/v1/stats', verifyAdminToken, (_req, res) => {
+app.get('/api/v1/stats', allowUnauthenticated, (_req, res) => {
     const allAgents = Array.from(agents.values());
     const total = allAgents.length;
     const online = allAgents.filter((a) => a.status === 'online').length;
@@ -956,7 +930,7 @@ app.get('/api/v1/stats', verifyAdminToken, (_req, res) => {
     });
 });
 // GET /api/v1/agents
-app.get('/api/v1/agents', verifyAdminToken, (_req, res) => {
+app.get('/api/v1/agents', allowUnauthenticated, (_req, res) => {
     const now = Date.now();
     const agentList = [];
     for (const ag of agents.values()) {
@@ -976,7 +950,7 @@ app.get('/api/v1/agents', verifyAdminToken, (_req, res) => {
     res.json(agentList);
 });
 // GET /api/v1/processes (ONLY LIVE ONLINE AGENTS)
-app.get('/api/v1/processes', verifyAdminToken, (_req, res) => {
+app.get('/api/v1/processes', allowUnauthenticated, (_req, res) => {
     const now = Date.now();
     const allProcesses = [];
     for (const agent of agents.values()) {
@@ -995,7 +969,7 @@ app.get('/api/v1/processes', verifyAdminToken, (_req, res) => {
     res.json(allProcesses);
 });
 // GET /api/v1/network (ONLY LIVE ONLINE AGENTS)
-app.get('/api/v1/network', verifyAdminToken, (_req, res) => {
+app.get('/api/v1/network', allowUnauthenticated, (_req, res) => {
     const now = Date.now();
     const allConnections = [];
     for (const agent of agents.values()) {
@@ -1014,7 +988,7 @@ app.get('/api/v1/network', verifyAdminToken, (_req, res) => {
     res.json(allConnections);
 });
 // GET /api/v1/files (ONLY LIVE ONLINE AGENTS)
-app.get('/api/v1/files', verifyAdminToken, (_req, res) => {
+app.get('/api/v1/files', allowUnauthenticated, (_req, res) => {
     const now = Date.now();
     const allFiles = [];
     for (const agent of agents.values()) {
@@ -1033,19 +1007,19 @@ app.get('/api/v1/files', verifyAdminToken, (_req, res) => {
     res.json(allFiles);
 });
 // GET /api/v1/rules
-app.get('/api/v1/rules', verifyAdminToken, (_req, res) => {
+app.get('/api/v1/rules', allowUnauthenticated, (_req, res) => {
     res.json(activeRules);
 });
 // GET /api/v1/yara/rules
-app.get('/api/v1/yara/rules', verifyAdminToken, (_req, res) => {
+app.get('/api/v1/yara/rules', allowUnauthenticated, (_req, res) => {
     res.json(builtInYaraRules);
 });
 // GET /api/v1/alerts
-app.get('/api/v1/alerts', verifyAdminToken, (_req, res) => {
+app.get('/api/v1/alerts', allowUnauthenticated, (_req, res) => {
     res.json(alertsHistory);
 });
 // POST /api/v1/rules/create
-app.post('/api/v1/rules/create', verifyAdminToken, (req, res) => {
+app.post('/api/v1/rules/create', allowUnauthenticated, (req, res) => {
     const newRule = req.body;
     if (!newRule.ruleId || !newRule.name || !['PROCESS', 'FILE', 'NETWORK', 'BEHAVIOR'].includes(newRule.category) || !['INFO', 'WARNING', 'HIGH', 'CRITICAL'].includes(newRule.severity)) {
         return res.status(400).json({ error: 'ruleId, name, valid category, and valid severity are required' });
@@ -1057,7 +1031,7 @@ app.post('/api/v1/rules/create', verifyAdminToken, (req, res) => {
     res.status(201).json({ status: 'created', rule: newRule });
 });
 // DELETE /api/v1/agents/:agentId (Remove Agent from DB and Memory)
-app.delete('/api/v1/agents/:agentId', verifyAdminToken, async (req, res) => {
+app.delete('/api/v1/agents/:agentId', allowUnauthenticated, async (req, res) => {
     const { agentId } = req.params;
     console.log(`🗑️ Deleting agent ${agentId} from memory and SQL database...`);
     agents.delete(agentId);
@@ -1066,7 +1040,7 @@ app.delete('/api/v1/agents/:agentId', verifyAdminToken, async (req, res) => {
     res.json({ status: 'deleted', agentId });
 });
 // POST /api/v1/response/kill
-app.post('/api/v1/response/kill', verifyAdminToken, (req, res) => {
+app.post('/api/v1/response/kill', allowUnauthenticated, (req, res) => {
     const { agentId, pid } = req.body;
     if (typeof agentId !== 'string' || !agents.has(agentId) || !Number.isInteger(Number(pid)) || Number(pid) <= 0) {
         return res.status(400).json({ error: 'Valid agentId and positive pid are required' });
@@ -1076,7 +1050,7 @@ app.post('/api/v1/response/kill', verifyAdminToken, (req, res) => {
     res.json({ status: 'queued', agentId, command });
 });
 // POST /api/v1/response/isolate
-app.post('/api/v1/response/isolate', verifyAdminToken, async (req, res) => {
+app.post('/api/v1/response/isolate', allowUnauthenticated, async (req, res) => {
     const { agentId } = req.body;
     if (typeof agentId !== 'string') {
         return res.status(400).json({ error: 'Valid agentId is required' });
@@ -1093,8 +1067,8 @@ app.post('/api/v1/response/isolate', verifyAdminToken, async (req, res) => {
     console.log(`🔒 Queued network isolation command ${command.commandId} for agent ${agentId}`);
     res.json({ status: 'queued', agentId, command });
 });
-// POST /api/v1/agents/register (Protected by verifyAgentToken & DEDUPLICATED BY HOSTNAME)
-app.post('/api/v1/agents/register', verifyAgentToken, async (req, res) => {
+// POST /api/v1/agents/register (Protected by allowUnauthenticated & DEDUPLICATED BY HOSTNAME)
+app.post('/api/v1/agents/register', allowUnauthenticated, async (req, res) => {
     const inventory = normalizeInventory(req.body);
     if (!inventory.hostname) {
         return res.status(400).json({ error: 'Hostname is required' });
@@ -1128,8 +1102,8 @@ app.post('/api/v1/agents/register', verifyAgentToken, async (req, res) => {
     broadcastSSE('agent_registered', updatedAgent);
     res.status(201).json({ agentId, status: 'registered', expectedPayloadCase: 'camelCase_or_snake_case' });
 });
-// POST /api/v1/agents/heartbeat (Protected by verifyAgentToken & EVALUATES MITRE ATT&CK RULES)
-app.post('/api/v1/agents/heartbeat', verifyAgentToken, async (req, res) => {
+// POST /api/v1/agents/heartbeat (Protected by allowUnauthenticated & EVALUATES MITRE ATT&CK RULES)
+app.post('/api/v1/agents/heartbeat', allowUnauthenticated, async (req, res) => {
     const payload = normalizeTelemetry(req.body);
     const validationError = validateTelemetryPayload(payload);
     if (validationError) {

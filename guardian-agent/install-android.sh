@@ -30,17 +30,6 @@ else
     SERVER_URL="$DEFAULT_SERVER"
 fi
 SERVER_URL="${SERVER_URL%/}"
-DOWNLOAD_TOKEN="${GUARDIAN_DOWNLOAD_TOKEN:-${GUARDIAN_ADMIN_TOKEN:-}}"
-AGENT_TOKEN="${GUARDIAN_AGENT_TOKEN:-}"
-append_token() {
-    local url="$1"
-    if [ -n "$DOWNLOAD_TOKEN" ]; then
-        printf "%s?token=%s" "$url" "$DOWNLOAD_TOKEN"
-    else
-        printf "%s" "$url"
-    fi
-}
-
 echo -e "${YELLOW}[1/6] Verificando ambiente de execução...${NC}"
 IS_TERMUX=false
 if [ -d "/data/data/com.termux" ] || [ -n "${TERMUX_VERSION:-}" ]; then
@@ -81,7 +70,7 @@ AGENT_FILE="$GUARDIAN_DIR/guardian_termux_agent.py"
 
 # 4. Download do Agente Python Atualizado
 echo -e "\n${YELLOW}[4/6] Baixando agente Guardian mais recente de ${SERVER_URL}...${NC}"
-AGENT_DOWNLOAD_URL="$(append_token "${SERVER_URL}/download/agent.py")"
+AGENT_DOWNLOAD_URL="${SERVER_URL}/download/agent.py"
 
 if command -v curl >/dev/null 2>&1; then
     curl -sSL "$AGENT_DOWNLOAD_URL" -o "$AGENT_FILE"
@@ -99,15 +88,6 @@ fi
 
 echo -e "       ${GREEN}✓ Agente salvo em $AGENT_FILE${NC}"
 echo "$SERVER_URL" > "$GUARDIAN_DIR/server_url.txt"
-if [ -n "$AGENT_TOKEN" ]; then
-    umask 077
-    printf "%s" "$AGENT_TOKEN" > "$GUARDIAN_DIR/agent_token.txt"
-    echo -e "       ${GREEN}✓ Token do agente salvo com permissões restritas.${NC}"
-fi
-if [ -n "$DOWNLOAD_TOKEN" ]; then
-    umask 077
-    printf "%s" "$DOWNLOAD_TOKEN" > "$GUARDIAN_DIR/download_token.txt"
-fi
 echo -e "       ${GREEN}✓ Servidor Mestre salvo: $SERVER_URL${NC}"
 
 # 5. Criar Atalho Global / Binário 'guardian'
@@ -121,18 +101,9 @@ AGENT_FILE="$GUARDIAN_DIR/guardian_termux_agent.py"
 PID_FILE="$GUARDIAN_DIR/guardian.pid"
 LOG_FILE="$GUARDIAN_DIR/guardian.log"
 SERVER_FILE="$GUARDIAN_DIR/server_url.txt"
-AGENT_TOKEN_FILE="$GUARDIAN_DIR/agent_token.txt"
-DOWNLOAD_TOKEN_FILE="$GUARDIAN_DIR/download_token.txt"
-
 SERVER_URL=""
 if [ -f "$SERVER_FILE" ]; then
     SERVER_URL=$(cat "$SERVER_FILE")
-fi
-if [ -f "$AGENT_TOKEN_FILE" ]; then
-    export GUARDIAN_AGENT_TOKEN="$(cat "$AGENT_TOKEN_FILE")"
-fi
-if [ -f "$DOWNLOAD_TOKEN_FILE" ]; then
-    export GUARDIAN_DOWNLOAD_TOKEN="$(cat "$DOWNLOAD_TOKEN_FILE")"
 fi
 
 case "$1" in
@@ -185,7 +156,7 @@ case "$1" in
         else
             rm -f "$PID_FILE"
             echo "🔴 Guardian Agente está INATIVO."
-            echo "ℹ️  Use: guardian logs  (para ver se houve erro de token, rede ou servidor)"
+            echo "ℹ️  Use: guardian logs  (para ver se houve erro de rede ou servidor)"
         fi
         if command -v su >/dev/null 2>&1 && su -c 'id -u' 2>/dev/null | grep -qx '0'; then
             echo "🔓 Root disponível: telemetria profunda habilitada."
@@ -200,9 +171,9 @@ case "$1" in
         fi
         echo "⬇️ Baixando agente atualizado de $SERVER_URL/download/agent.py ..."
         if command -v curl >/dev/null 2>&1; then
-            curl -sSL "${SERVER_URL}/download/agent.py${GUARDIAN_DOWNLOAD_TOKEN:+?token=$GUARDIAN_DOWNLOAD_TOKEN}" -o "$AGENT_FILE"
+            curl -sSL "${SERVER_URL}/download/agent.py" -o "$AGENT_FILE"
         elif command -v wget >/dev/null 2>&1; then
-            wget -q "${SERVER_URL}/download/agent.py${GUARDIAN_DOWNLOAD_TOKEN:+?token=$GUARDIAN_DOWNLOAD_TOKEN}" -O "$AGENT_FILE"
+            wget -q "${SERVER_URL}/download/agent.py" -O "$AGENT_FILE"
         else
             echo "❌ curl/wget não encontrado."
             exit 1
