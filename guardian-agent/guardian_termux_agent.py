@@ -25,6 +25,53 @@ import re
 
 VALID_AGENT_TOKEN = "GUARDIAN-SECRET-AGENT-KEY-v0.9"
 
+_ROOT_PROBE_DONE = False
+_ROOT_AVAILABLE = False
+
+def is_root_available():
+    """Return True when Termux can execute commands through su -c."""
+    global _ROOT_PROBE_DONE, _ROOT_AVAILABLE
+    if _ROOT_PROBE_DONE:
+        return _ROOT_AVAILABLE
+    _ROOT_PROBE_DONE = True
+    try:
+        res = subprocess.run(['su', '-c', 'id -u'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=3)
+        _ROOT_AVAILABLE = res.returncode == 0 and res.stdout.strip() == '0'
+    except Exception:
+        _ROOT_AVAILABLE = False
+    return _ROOT_AVAILABLE
+
+def _run_command(cmd, timeout=4, root=False):
+    """Run a command normally or through su -c when root telemetry is available."""
+    try:
+        if root:
+            if not is_root_available():
+                return None
+            command_text = ' '.join(shlex_quote(str(part)) for part in cmd)
+            final_cmd = ['su', '-c', command_text]
+        else:
+            final_cmd = cmd
+        res = subprocess.run(final_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout)
+        if res.returncode == 0 and res.stdout:
+            return res.stdout
+    except Exception:
+        pass
+    return None
+
+def shlex_quote(value):
+    """Small POSIX shell quote helper to avoid an extra import on old Termux Python builds."""
+    return "'" + value.replace("'", "'\"'\"'") + "'"
+
+def _read_file_text(pathname, root=False, timeout=4):
+    """Read a file directly, or via su cat for rooted Android telemetry."""
+    if root:
+        return _run_command(['cat', pathname], timeout=timeout, root=True) or ''
+    try:
+        with open(pathname, 'r') as f:
+            return f.read()
+    except Exception:
+        return ''
+
 # ─── CPU Usage (Delta /proc/stat) ───────────────────────────────────────────
 
 _prev_cpu_idle = 0
@@ -365,21 +412,22 @@ def get_real_processes():
     # 3. System `ps` parsers. Android toybox variants expose system/app
     # processes even when /proc/[pid]/cmdline is hidden from Termux. Try explicit
     # columns first, then fall back to the device default header.
+    root_enabled = is_root_available()
     for ps_cmd in (
+        ['ps', '-A', '-o', 'PID,PPID,USER,NAME,ARGS'],
         ['ps', '-A', '-o', 'PID,PPID,NAME,ARGS'],
         ['ps', '-e', '-o', 'PID,PPID,NAME,ARGS'],
         ['ps', '-A'],
         ['ps'],
     ):
-        try:
-            res = subprocess.run(ps_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=3)
-            if res.returncode == 0 and res.stdout:
-                for pid, ppid, name in _parse_ps_table(res.stdout):
-                    if pid != self_pid:
-                        exe = name if '/' in name else f"/system/bin/{os.path.basename(name)}"
-                        _add_process(processes, seen_pids, seen_names, pid, os.path.basename(name), exe, ppid)
-        except Exception:
-            continue
+        for use_root in (False, root_enabled):
+            output = _run_command(ps_cmd, timeout=4, root=use_root)
+            if not output:
+                continue
+            for pid, ppid, name in _parse_ps_table(output):
+                if pid != self_pid:
+                    exe = name if '/' in name else f"/system/bin/{os.path.basename(name)}"
+                    _add_process(processes, seen_pids, seen_names, pid, os.path.basename(name), exe, ppid)
 
     # 4. Enumerate /proc/[pid] reading /proc/[pid]/comm for local Linux/Termux processes
     try:
@@ -487,17 +535,19 @@ _TCP_STATES = {
     '0A': 'LISTEN', '0B': 'CLOSING'
 }
 
-def _read_proc_net_file(filepath, protocol):
+def _read_proc_net_file(filepath, protocol, root=False):
     """Parse a /proc/net/{tcp,udp} file into structured socket records."""
     sockets = []
     uid_map = get_uid_package_map()
 
     try:
-        if not os.path.exists(filepath):
+        if not os.path.exists(filepath) and not root:
             return sockets
-            
-        with open(filepath, 'r') as f:
-            lines = f.readlines()[1:]  # skip header
+
+        content = _read_file_text(filepath, root=root)
+        if not content:
+            return sockets
+        lines = content.splitlines()[1:]  # skip header
 
         for line in lines:
             parts = line.strip().split()
@@ -618,6 +668,7 @@ def _read_command_sockets():
     """Collect sockets via Android toybox ss/netstat when /proc/net is scoped."""
     sockets = []
     seen = set()
+    root_enabled = is_root_available()
     commands = (
         ['ss', '-H', '-tunap'],
         ['ss', '-H', '-tunp'],
@@ -625,11 +676,11 @@ def _read_command_sockets():
         ['netstat', '-tun'],
     )
     for cmd in commands:
-        try:
-            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=4)
-            if res.returncode != 0 or not res.stdout:
+        for use_root in (False, root_enabled):
+            output = _run_command(cmd, timeout=4, root=use_root)
+            if not output:
                 continue
-            for line in res.stdout.splitlines():
+            for line in output.splitlines():
                 parts = line.split()
                 if len(parts) < 5 or parts[0].lower().startswith(('proto', 'netid')):
                     continue
@@ -661,8 +712,6 @@ def _read_command_sockets():
                     if m:
                         pid = int(m.group(1)); proc = m.group(2)
                 _append_socket(sockets, seen, protocol, local_ip, local_port, remote_ip, remote_port, status, proc, pid)
-        except Exception:
-            continue
     return sockets
 
 def get_real_sockets():
@@ -676,7 +725,9 @@ def get_real_sockets():
     proc_sockets = []
     for fname, proto in [('/proc/net/tcp', 'TCP'), ('/proc/net/tcp6', 'TCP6'),
                          ('/proc/net/udp', 'UDP'), ('/proc/net/udp6', 'UDP6')]:
-        proc_sockets.extend(_read_proc_net_file(fname, proto))
+        proc_sockets.extend(_read_proc_net_file(fname, proto, root=False))
+        if is_root_available():
+            proc_sockets.extend(_read_proc_net_file(fname, proto, root=True))
 
     # Resolve PIDs where permissions allow
     _resolve_socket_pids(proc_sockets)

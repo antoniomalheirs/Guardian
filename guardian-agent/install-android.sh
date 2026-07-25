@@ -119,6 +119,9 @@ case "$1" in
                 echo "❌ Python não encontrado. Instale com: pkg install python"
                 exit 1
             fi
+            if command -v su >/dev/null 2>&1 && su -c 'id -u' 2>/dev/null | grep -qx '0'; then
+                echo "🔓 Root detectado: o agente usará su -c para telemetria profunda de processos e sockets."
+            fi
             nohup "$PYTHON_BIN" "$AGENT_FILE" "$SERVER_URL" > "$LOG_FILE" 2>&1 &
             echo $! > "$PID_FILE"
             echo "✅ Agente iniciado com sucesso! PID: $(cat $PID_FILE)"
@@ -144,6 +147,29 @@ case "$1" in
         else
             echo "🔴 Guardian Agente está INATIVO."
         fi
+        if command -v su >/dev/null 2>&1 && su -c 'id -u' 2>/dev/null | grep -qx '0'; then
+            echo "🔓 Root disponível: telemetria profunda habilitada."
+        else
+            echo "🔒 Root não disponível/autorizado: usando modo Android sem root."
+        fi
+        ;;
+    update)
+        if [ -z "$SERVER_URL" ]; then
+            echo "❌ URL do servidor não encontrada em $SERVER_FILE"
+            exit 1
+        fi
+        echo "⬇️ Baixando agente atualizado de $SERVER_URL/download/agent.py ..."
+        if command -v curl >/dev/null 2>&1; then
+            curl -sSL "$SERVER_URL/download/agent.py" -o "$AGENT_FILE"
+        elif command -v wget >/dev/null 2>&1; then
+            wget -q "$SERVER_URL/download/agent.py" -O "$AGENT_FILE"
+        else
+            echo "❌ curl/wget não encontrado."
+            exit 1
+        fi
+        chmod +x "$AGENT_FILE" 2>/dev/null || true
+        echo "✅ Agente atualizado. Reiniciando..."
+        $0 restart
         ;;
     log|logs)
         touch "$LOG_FILE"
@@ -155,7 +181,7 @@ case "$1" in
         $0 start
         ;;
     *)
-        echo "Uso: guardian {start|stop|restart|status|logs}"
+        echo "Uso: guardian {start|stop|restart|status|logs|update}"
         ;;
 esac
 EOF
