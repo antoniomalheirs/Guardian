@@ -21,7 +21,7 @@ echo -e "${NC}"
 
 # 1. Detectar Servidor Mestre (Extraído da URL de Download ou Argumento)
 DEFAULT_SERVER="${GUARDIAN_SERVER:-http://192.168.50.140:4000}"
-if [ -n "$1" ]; then
+if [ -n "${1:-}" ]; then
     SERVER_URL="$1"
 else
     SERVER_URL="$DEFAULT_SERVER"
@@ -163,7 +163,7 @@ EOF
 chmod +x "$CLI_BIN"
 
 # Copiar para $PREFIX/bin (pasta nativa de executáveis do Termux) para acesso global imediato
-if [ -d "$PREFIX/bin" ]; then
+if [ -n "${PREFIX:-}" ] && [ -d "$PREFIX/bin" ]; then
     cp "$CLI_BIN" "$PREFIX/bin/guardian" 2>/dev/null || true
     chmod +x "$PREFIX/bin/guardian" 2>/dev/null || true
 fi
