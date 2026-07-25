@@ -29,6 +29,7 @@ pub struct ProcessTelemetry {
     pub parent_pid: Option<u32>,
     pub name: String,
     pub executable_path: String,
+    pub command_line: String,
     pub cpu_pct: f32,
     pub memory_mb: u64,
     pub sha256_hash: String,
@@ -536,7 +537,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         sys.refresh_memory();
         sys.refresh_processes();
 
-        // ── Deep Process Enumeration with SHA-256 & Parent PIDs ──
+        // ── Deep Process Enumeration with SHA-256, Parent PIDs & Command Lines ──
         let mut top_processes: Vec<ProcessTelemetry> = Vec::new();
         let mut process_list: Vec<(&sysinfo::Pid, &sysinfo::Process)> = sys.processes().iter().collect();
         // Sort by CPU usage descending to get the most active processes
@@ -544,10 +545,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let mut count = 0;
         for (pid, proc_) in &process_list {
-            if count >= 25 {
+            if count >= 100 {
                 break;
             }
             let path_str = proc_.exe().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+            let command_line = proc_.cmd().join(" ");
             let hash = if !path_str.is_empty() {
                 compute_sha256(&path_str)
             } else {
@@ -559,6 +561,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 parent_pid: proc_.parent().map(|p| p.as_u32()),
                 name: proc_.name().to_string(),
                 executable_path: path_str,
+                command_line,
                 cpu_pct: proc_.cpu_usage(),
                 memory_mb: proc_.memory() / (1024 * 1024),
                 sha256_hash: hash,

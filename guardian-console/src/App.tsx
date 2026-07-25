@@ -38,6 +38,7 @@ interface ProcessTelemetry {
   parentPid?: number | null;
   name: string;
   executablePath: string;
+  commandLine?: string;
   cpuPct: number;
   memoryMb: number;
   sha256Hash: string;
@@ -773,7 +774,7 @@ export default function App() {
                       </td>
                       <td className="mono-text" style={{ padding: '12px', color: 'var(--accent-cyan)', fontWeight: 700 }}>{proc.pid}</td>
                       <td style={{ padding: '12px', fontWeight: 700, color: '#fff' }}>{proc.name}</td>
-                      <td className="mono-text" style={{ padding: '12px', color: 'var(--text-secondary)', fontSize: '0.75rem' }}>{proc.executablePath || 'N/A (Kernel/System)'}</td>
+                      <td className="mono-text" style={{ padding: '12px', color: 'var(--text-secondary)', fontSize: '0.75rem' }}>{proc.commandLine || proc.executablePath || 'N/A (Kernel/System)'}</td>
                       <td style={{ padding: '12px', color: proc.cpuPct > 50 ? '#f87171' : '#34d399' }}>{(proc.cpuPct || 0).toFixed(1)}%</td>
                       <td style={{ padding: '12px', color: '#fff' }}>{proc.memoryMb} MB</td>
                       <td className="mono-text" style={{ padding: '12px', color: 'var(--text-muted)', fontSize: '0.7rem' }}>
@@ -1256,7 +1257,7 @@ export default function App() {
                     <span className="mono-text" style={{ color: '#38bdf8' }}>{selectedProcessDetails.cpuPct.toFixed(1)}% CPU</span>
                   </div>
                   <div className="mono-text" style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
-                    {selectedProcessDetails.executablePath}
+                    {selectedProcessDetails.commandLine || selectedProcessDetails.executablePath}
                   </div>
                 </div>
 

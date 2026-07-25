@@ -209,6 +209,22 @@ let activeRules: RuleDefinition[] = [
     enabled: true,
   },
   {
+    ruleId: 'RULE-CMDLINE-021',
+    name: 'Suspicious Command-Line Tradecraft',
+    category: 'PROCESS',
+    severity: 'HIGH',
+    description: 'Detects download/execute, encoded, hidden and in-memory execution patterns in process command lines [MITRE T1059/T1105]',
+    enabled: true,
+  },
+  {
+    ruleId: 'RULE-FILE-022',
+    name: 'Startup Persistence File Drop',
+    category: 'FILE',
+    severity: 'HIGH',
+    description: 'Detects new files in Startup, cron, systemd and shell profile persistence locations [MITRE T1547]',
+    enabled: true,
+  },
+  {
     ruleId: 'RULE-FINDING-019',
     name: 'Agent Deep Security Finding Escalation',
     category: 'BEHAVIOR',
@@ -531,6 +547,26 @@ const KNOWN_SYSTEM_PROCS = new Set(['system', 'idle', 'svchost.exe', 'csrss.exe'
 const LATERAL_PORTS = new Set([445, 3389, 5985, 5986, 22, 23, 135, 139]);
 const SUSPICIOUS_C2_PORTS = new Set([4444, 6667, 1337, 8888, 31337, 9999, 1234, 5555, 7777, 13337]);
 
+const SUSPICIOUS_CMDLINE_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
+  { pattern: /\b(iwr|irm|curl|wget)\b.+\b(iex|bash|sh|powershell|pwsh|cmd)\b/i, label: 'download cradle com execução direta' },
+  { pattern: /\b(encodedcommand|-enc|frombase64string)\b/i, label: 'payload codificado/base64' },
+  { pattern: /\b(windowstyle\s+hidden|-w\s+hidden|nop|noprofile|executionpolicy\s+bypass|-ep\s+bypass)\b/i, label: 'PowerShell evasivo/oculto' },
+  { pattern: /\b(mshta|regsvr32|rundll32)\b.+\b(http|https|javascript:|vbscript:)\b/i, label: 'LOLBin carregando conteúdo remoto/script' },
+  { pattern: /\bcertutil\b.+(-urlcache|-decode|-f)\b/i, label: 'certutil para download/decodificação' },
+  { pattern: /\b(bitsadmin)\b.+\b(transfer|download)\b/i, label: 'bitsadmin para transferência de payload' },
+  { pattern: /\b(chmod\s+\+x|base64\s+-d|\/dev\/tcp|nc\s+-e|ncat\s+-e|socat\s+exec)\b/i, label: 'shell Linux/Termux reverso ou dropper' },
+];
+
+const PERSISTENCE_PATH_PATTERNS = [
+  /\/microsoft\/windows\/start menu\/programs\/startup\//i,
+  /\/appdata\/roaming\/microsoft\/windows\/start menu\/programs\/startup\//i,
+  /(^|\/)\.config\/autostart\//i,
+  /(^|\/)\.config\/systemd\/user\//i,
+  /(^|\/)etc\/systemd\/system\//i,
+  /(^|\/)etc\/cron\.(d|daily|hourly|weekly|monthly)\//i,
+  /(^|\/)(\.bashrc|\.profile|\.zshrc|\.termux\/boot\/)/i,
+];
+
 async function evaluateATTACKRules(agent: AgentRecord, payload: TelemetryPayload) {
   const procs = payload.topProcesses || [];
   const conns = payload.networkConnections || [];
@@ -544,11 +580,11 @@ async function evaluateATTACKRules(agent: AgentRecord, payload: TelemetryPayload
   // ═══ 1. PowerShell Encoded Command [T1059.001] ═══
   for (const proc of procs) {
     const name = proc.name.toLowerCase();
-    const exe = proc.executablePath.toLowerCase();
-    if ((name.includes('powershell') || name.includes('pwsh')) && 
-        (exe.includes('-enc') || exe.includes('encodedcommand') || exe.includes('base64') || exe.includes('-nop') || exe.includes('bypass'))) {
+    const cmd = `${proc.commandLine || ''} ${proc.executablePath || ''}`.toLowerCase();
+    if ((name.includes('powershell') || name.includes('pwsh')) &&
+        (cmd.includes('-enc') || cmd.includes('encodedcommand') || cmd.includes('frombase64string') || cmd.includes('-nop') || cmd.includes('bypass'))) {
       await fireAlert(agent, 'RULE-WIN-001', 'PowerShell Encoded Command Execution', 'HIGH',
-        `PID ${proc.pid} (${proc.name}) executou payload PowerShell codificado. Path: ${proc.executablePath}`);
+        `PID ${proc.pid} (${proc.name}) executou payload PowerShell suspeito. Cmd: ${proc.commandLine || proc.executablePath}`);
     }
   }
 
@@ -612,7 +648,18 @@ async function evaluateATTACKRules(agent: AgentRecord, payload: TelemetryPayload
     }
   }
 
-  // ═══ 7. LOLBin Execution [T1218] ═══
+  // ═══ 7. Suspicious command-line tradecraft [T1059/T1105] ═══
+  for (const proc of procs) {
+    const commandText = `${proc.name} ${proc.commandLine || ''} ${proc.executablePath || ''}`.trim();
+    for (const { pattern, label } of SUSPICIOUS_CMDLINE_PATTERNS) {
+      if (pattern.test(commandText)) {
+        await fireAlert(agent, 'RULE-CMDLINE-021', 'Suspicious Command-Line Tradecraft', 'HIGH',
+          `${label}: ${proc.name} (PID ${proc.pid}) — ${commandText.slice(0, 500)}`);
+      }
+    }
+  }
+
+  // ═══ 8. LOLBin Execution [T1218] ═══
   for (const proc of procs) {
     if (LOLBINS.has(proc.name.toLowerCase())) {
       await fireAlert(agent, 'RULE-LOL-014', 'Living-off-the-Land Binary Execution', 'HIGH',
@@ -620,7 +667,7 @@ async function evaluateATTACKRules(agent: AgentRecord, payload: TelemetryPayload
     }
   }
 
-  // ═══ 8. C2 Beaconing Detection [T1071.001] ═══
+  // ═══ 9. C2 Beaconing Detection [T1071.001] ═══
   const currentTargets = new Map<string, number>();
   for (const conn of conns) {
     if (conn.status === 'ESTABLISHED' && conn.remoteAddress && conn.remotePort > 0) {
@@ -649,7 +696,7 @@ async function evaluateATTACKRules(agent: AgentRecord, payload: TelemetryPayload
     if (!currentTargets.has(target)) history.connectionTargets.delete(target);
   }
 
-  // ═══ 9. Data Exfiltration Volume Spike [T1041] ═══
+  // ═══ 10. Data Exfiltration Volume Spike [T1041] ═══
   const currentConnCount = conns.filter(c => c.status === 'ESTABLISHED').length;
   if (history.prevConnectionCount > 0 && currentConnCount > history.prevConnectionCount * 3 && currentConnCount > 10) {
     await fireAlert(agent, 'RULE-EXFIL-016', 'Data Exfiltration Connection Volume Spike', 'HIGH',
@@ -658,7 +705,7 @@ async function evaluateATTACKRules(agent: AgentRecord, payload: TelemetryPayload
   history.prevConnectionCount = currentConnCount;
   history.prevTimestamp = Date.now();
 
-  // ═══ 10. Cryptominer Detection [T1496] ═══
+  // ═══ 11. Cryptominer Detection [T1496] ═══
   if (payload.cpuUsagePct > 85) {
     const topProc = [...procs].sort((a, b) => b.cpuPct - a.cpuPct)[0];
     if (topProc && !KNOWN_SYSTEM_PROCS.has(topProc.name.toLowerCase())) {
@@ -667,20 +714,20 @@ async function evaluateATTACKRules(agent: AgentRecord, payload: TelemetryPayload
     }
   }
 
-  // ═══ 11. Resource Exhaustion [T1499] ═══
+  // ═══ 12. Resource Exhaustion [T1499] ═══
   if (payload.cpuUsagePct > 85 || payload.memoryUsagePct > 90) {
     await fireAlert(agent, 'RULE-RES-004', 'Endpoint High Resource Exhaustion Spike', 'WARNING',
       `Recursos críticos: CPU ${payload.cpuUsagePct.toFixed(1)}% | RAM ${payload.memoryUsagePct.toFixed(1)}%`);
   }
 
-  // ═══ 12. DNS Tunneling [T1071.004] ═══
+  // ═══ 13. DNS Tunneling [T1071.004] ═══
   const dnsConns = conns.filter(c => c.remotePort === 53 && c.protocol.toUpperCase().includes('UDP'));
   if (dnsConns.length > 10) {
     await fireAlert(agent, 'RULE-NET-008', 'DNS Tunneling High Frequency Query Exfiltration', 'HIGH',
       `${dnsConns.length} conexões DNS UDP detectadas neste heartbeat — possível túnel DNS para exfiltração`);
   }
 
-  // ═══ 13. Lateral Movement [T1021] ═══
+  // ═══ 14. Lateral Movement [T1021] ═══
   for (const conn of conns) {
     if (LATERAL_PORTS.has(conn.remotePort) && conn.status === 'ESTABLISHED') {
       const procName = conn.processName.toLowerCase();
@@ -692,7 +739,7 @@ async function evaluateATTACKRules(agent: AgentRecord, payload: TelemetryPayload
     }
   }
 
-  // ═══ 14. WMI Execution [T1047] ═══
+  // ═══ 15. WMI Execution [T1047] ═══
   for (const proc of procs) {
     if (proc.name.toLowerCase() === 'wmic.exe' || proc.name.toLowerCase() === 'wmiprvse.exe') {
       await fireAlert(agent, 'RULE-CMD-009', 'WMI Administrative Command Line Execution', 'INFO',
@@ -700,7 +747,7 @@ async function evaluateATTACKRules(agent: AgentRecord, payload: TelemetryPayload
     }
   }
 
-  // ═══ 15. System32 File Alteration [T1554] ═══
+  // ═══ 16. System32 File Alteration [T1554] ═══
   for (const fileEvt of files) {
     const fp = fileEvt.filePath.toLowerCase().replace(/\//g, '\\');
     if ((fp.includes('\\windows\\system32\\') || fp.includes('\\windows\\syswow64\\')) &&
@@ -710,7 +757,18 @@ async function evaluateATTACKRules(agent: AgentRecord, payload: TelemetryPayload
     }
   }
 
-  // ═══ 16. Agent Security Findings Escalation ═══
+  // ═══ 17. Startup persistence file drops [T1547] ═══
+  for (const fileEvt of files) {
+    if (fileEvt.action === 'CREATED' || fileEvt.action === 'MODIFIED') {
+      const fp = fileEvt.filePath.replace(/\\/g, '/').toLowerCase();
+      if (PERSISTENCE_PATH_PATTERNS.some((pattern) => pattern.test(fp))) {
+        await fireAlert(agent, 'RULE-FILE-022', 'Startup Persistence File Drop', 'HIGH',
+          `Arquivo alterado em local de persistência: ${fileEvt.filePath} (${fileEvt.action})`);
+      }
+    }
+  }
+
+  // ═══ 18. Agent Security Findings Escalation ═══
   for (const finding of findings) {
     if (finding.severity === 'HIGH' || finding.severity === 'CRITICAL') {
       await fireAlert(agent, 'RULE-FINDING-019', `Agent Finding: ${finding.findingType}`, finding.severity as EDRAlert['severity'],
@@ -718,7 +776,7 @@ async function evaluateATTACKRules(agent: AgentRecord, payload: TelemetryPayload
     }
   }
 
-  // ═══ 17. YARA Signature Matching ═══
+  // ═══ 19. YARA Signature Matching ═══
   for (const fileEvt of files) {
     if (fileEvt.yaraMatches && fileEvt.yaraMatches.length > 0) {
       for (const matchName of fileEvt.yaraMatches) {

@@ -287,14 +287,14 @@ def _add_process(processes, seen_pids, seen_names, pid, name, exe_path='', paren
     if package_name and not package_name.startswith('com.') and not name.startswith('app_process'):
         package_name = None
 
-    if not exe_path:
-        try:
-            with open(f'/proc/{pid_str}/cmdline', 'rb') as f:
-                cmd = f.read(512).replace(b'\x00', b' ').decode('utf-8', errors='ignore').strip()
-                if cmd:
-                    exe_path = cmd.split()[0]
-        except Exception:
-            pass
+    command_line = ''
+    try:
+        with open(f'/proc/{pid_str}/cmdline', 'rb') as f:
+            command_line = f.read(1024).replace(b'\x00', b' ').decode('utf-8', errors='ignore').strip()
+    except Exception:
+        pass
+    if not exe_path and command_line:
+        exe_path = command_line.split()[0]
     if not exe_path:
         try:
             exe_path = os.readlink(f'/proc/{pid_str}/exe')
@@ -313,6 +313,7 @@ def _add_process(processes, seen_pids, seen_names, pid, name, exe_path='', paren
         "parentPid": parent_pid,
         "name": display_name,
         "executablePath": exe_path,
+        "commandLine": command_line,
         "cpuPct": 0.0,
         "memoryMb": memory_mb or 0.0,
         "sha256Hash": "ANDROID_PACKAGE" if (display_name.startswith('com.') or package_name) else ("KERNEL_THREAD" if display_name.startswith('Kernel thread:') else compute_sha256(exe_path))
@@ -486,11 +487,12 @@ def get_real_processes():
                 except Exception:
                     pass
 
+                command_line = ''
                 try:
                     with open(f'{proc_dir}/cmdline', 'rb') as f:
-                        content = f.read(512).replace(b'\x00', b' ').decode('utf-8', errors='ignore').strip()
-                        if content:
-                            cmd_parts = content.split()
+                        command_line = f.read(1024).replace(b'\x00', b' ').decode('utf-8', errors='ignore').strip()
+                        if command_line:
+                            cmd_parts = command_line.split()
                             exe_path = cmd_parts[0]
                             cmd_name = os.path.basename(cmd_parts[0])
                             if cmd_name and not name:
@@ -526,6 +528,7 @@ def get_real_processes():
                     "parentPid": status.get('ppid'),
                     "name": display_name,
                     "executablePath": exe_path,
+                    "commandLine": command_line,
                     "cpuPct": 0.0,
                     "memoryMb": memory_mb,
                     "sha256Hash": "ANDROID_PACKAGE" if (package_name or display_name.startswith('com.')) else ("KERNEL_THREAD" if display_name.startswith('Kernel thread:') else compute_sha256(exe_path))
