@@ -821,6 +821,171 @@ fn collect_security_findings(processes: &[ProcessTelemetry], _sys: &System) -> V
         }
     }
 
-    findings.truncate(50);
+    // 8. PowerShell Obfuscation & DownloadString Analyzer [T1059.001]
+    let ps_keywords = ["downloadstring", "downloadfile", "invoke-expression", "iex(", "iex ", "net.webclient", "bitstransfer", "[char[]]", "system.net.sockets"];
+    for proc in processes {
+        let exe_lower = proc.executable_path.to_lowercase();
+        for kw in &ps_keywords {
+            if exe_lower.contains(kw) {
+                findings.push(SecurityFinding {
+                    finding_type: "POWERSHELL_OBFUSCATION".to_string(),
+                    severity: "HIGH".to_string(),
+                    description: format!("Comando PowerShell obfuscado/download suspeito no PID {}: '{}'", proc.pid, kw),
+                    evidence: proc.executable_path.chars().take(120).collect::<String>(),
+                    mitre_id: "T1059.001".to_string(),
+                });
+                break;
+            }
+        }
+    }
+
+    // 9. Windows Defender / AV Status Check [T1562.001]
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(output) = std::process::Command::new("powershell")
+            .args(&["-NoProfile", "-Command", "Get-MpComputerStatus | Select-Object -Property AntivirusEnabled,RealTimeProtectionEnabled,IsTamperProtected | ConvertTo-Json"])
+            .output()
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout).to_lowercase();
+            if stdout.contains("false") {
+                findings.push(SecurityFinding {
+                    finding_type: "AV_DISABLED".to_string(),
+                    severity: "CRITICAL".to_string(),
+                    description: "Windows Defender ou proteção em tempo real está DESATIVADO".to_string(),
+                    evidence: stdout.chars().take(200).collect::<String>(),
+                    mitre_id: "T1562.001".to_string(),
+                });
+            }
+        }
+    }
+
+    // 10. Firewall Status Check [T1562.004]
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(output) = std::process::Command::new("netsh")
+            .args(&["advfirewall", "show", "allprofiles", "state"])
+            .output()
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout).to_lowercase();
+            if stdout.contains("off") || stdout.contains("desativado") {
+                findings.push(SecurityFinding {
+                    finding_type: "FIREWALL_DISABLED".to_string(),
+                    severity: "HIGH".to_string(),
+                    description: "Firewall do Windows está DESATIVADO em um ou mais perfis".to_string(),
+                    evidence: stdout.chars().take(200).collect::<String>(),
+                    mitre_id: "T1562.004".to_string(),
+                });
+            }
+        }
+    }
+
+    // 11. Open Shares / SMB Shares [T1021.002]
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(output) = std::process::Command::new("net")
+            .args(&["share"])
+            .output()
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let mut share_count = 0;
+            for line in stdout.lines() {
+                if line.contains(":\\") && !line.contains("$") {
+                    share_count += 1;
+                    findings.push(SecurityFinding {
+                        finding_type: "OPEN_SHARE".to_string(),
+                        severity: "WARNING".to_string(),
+                        description: "Compartilhamento de rede aberto sem $ (visível)".to_string(),
+                        evidence: line.trim().chars().take(120).collect::<String>(),
+                        mitre_id: "T1021.002".to_string(),
+                    });
+                }
+            }
+            if share_count == 0 {
+                for line in stdout.lines() {
+                    let l = line.to_lowercase();
+                    if l.contains("admin$") || l.contains("c$") || l.contains("ipc$") {
+                        findings.push(SecurityFinding {
+                            finding_type: "ADMIN_SHARE_ACTIVE".to_string(),
+                            severity: "INFO".to_string(),
+                            description: "Compartilhamento administrativo padrão ativo".to_string(),
+                            evidence: line.trim().chars().take(100).collect::<String>(),
+                            mitre_id: "T1021.002".to_string(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // 12. RDP Status / Remote Desktop Enabled [T1021.001]
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(output) = std::process::Command::new("reg")
+            .args(&["query", "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Terminal Server", "/v", "fDenyTSConnections"])
+            .output()
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if stdout.contains("0x0") {
+                findings.push(SecurityFinding {
+                    finding_type: "RDP_ENABLED".to_string(),
+                    severity: "WARNING".to_string(),
+                    description: "Remote Desktop (RDP) está HABILITADO neste host".to_string(),
+                    evidence: "fDenyTSConnections = 0x0 (RDP ativo)".to_string(),
+                    mitre_id: "T1021.001".to_string(),
+                });
+            }
+        }
+    }
+
+    // 13. Startup Folder Items [T1547.001]
+    #[cfg(target_os = "windows")]
+    {
+        let startup_dirs = [
+            format!("{}\\Microsoft\\Windows\\Start Menu\\Programs\\Startup", env::var("APPDATA").unwrap_or_default()),
+            "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\Startup".to_string(),
+        ];
+        for dir in &startup_dirs {
+            if let Ok(entries) = fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name.ends_with(".exe") || name.ends_with(".bat") || name.ends_with(".vbs") || name.ends_with(".ps1") || name.ends_with(".cmd") {
+                        findings.push(SecurityFinding {
+                            finding_type: "STARTUP_ITEM".to_string(),
+                            severity: "WARNING".to_string(),
+                            description: format!("Executável na pasta Startup: {}", name),
+                            evidence: entry.path().to_string_lossy().chars().take(150).collect::<String>(),
+                            mitre_id: "T1547.001".to_string(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // 14. Hosts File Tampering [T1565.001]
+    #[cfg(target_os = "windows")]
+    {
+        let hosts_path = "C:\\Windows\\System32\\drivers\\etc\\hosts";
+        if let Ok(content) = fs::read_to_string(hosts_path) {
+            let mut custom_entries = 0;
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() && !trimmed.starts_with('#') && !trimmed.contains("localhost") {
+                    custom_entries += 1;
+                    if custom_entries <= 5 {
+                        findings.push(SecurityFinding {
+                            finding_type: "HOSTS_TAMPERED".to_string(),
+                            severity: "WARNING".to_string(),
+                            description: "Entrada customizada no arquivo HOSTS (possível DNS hijacking)".to_string(),
+                            evidence: trimmed.chars().take(100).collect::<String>(),
+                            mitre_id: "T1565.001".to_string(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    findings.truncate(80);
     findings
 }

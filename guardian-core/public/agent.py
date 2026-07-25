@@ -1131,252 +1131,6 @@ def detect_unlinked_memory_executables():
         pass
     return findings
 
-def detect_running_vpn():
-    """Detect if a VPN connection is active (tun0/ppp0 interfaces)."""
-    findings = []
-    try:
-        for iface in ['tun0', 'tun1', 'ppp0', 'ppp1']:
-            if os.path.exists(f'/sys/class/net/{iface}'):
-                findings.append({
-                    'findingType': 'VPN_ACTIVE',
-                    'severity': 'INFO',
-                    'description': f'Interface VPN ativa detectada: {iface}',
-                    'evidence': f'/sys/class/net/{iface} exists',
-                    'mitreId': 'T1572'
-                })
-    except Exception:
-        pass
-    return findings
-
-
-def detect_open_listening_ports():
-    """Detect all listening ports and flag dangerous ones."""
-    findings = []
-    dangerous_ports = {21: 'FTP', 23: 'Telnet', 25: 'SMTP', 445: 'SMB', 3389: 'RDP', 5555: 'ADB', 8080: 'HTTP-Proxy', 4444: 'Metasploit', 1337: 'Hacker', 6667: 'IRC-C2'}
-    try:
-        for proto_file in ['/proc/net/tcp', '/proc/net/tcp6']:
-            if not os.path.exists(proto_file):
-                continue
-            with open(proto_file, 'r') as f:
-                for line in f.readlines()[1:]:
-                    parts = line.strip().split()
-                    if len(parts) >= 4 and parts[3] == '0A':  # LISTEN state
-                        port_hex = parts[1].split(':')[1]
-                        port = int(port_hex, 16)
-                        if port in dangerous_ports:
-                            findings.append({
-                                'findingType': 'DANGEROUS_LISTENING_PORT',
-                                'severity': 'HIGH' if port in (4444, 1337, 6667, 5555) else 'WARNING',
-                                'description': f'Porta perigosa {port} ({dangerous_ports[port]}) em LISTEN',
-                                'evidence': f'Protocolo: {proto_file}, Porta: {port}',
-                                'mitreId': 'T1071'
-                            })
-    except Exception:
-        pass
-    return findings
-
-
-def detect_world_writable_executables():
-    """Detect world-writable executables in critical directories."""
-    findings = []
-    try:
-        critical_dirs = ['/system/bin', '/system/xbin', '/vendor/bin', '/data/local/tmp']
-        for d in critical_dirs:
-            if not os.path.isdir(d):
-                continue
-            try:
-                for f in os.listdir(d)[:50]:
-                    fpath = os.path.join(d, f)
-                    try:
-                        mode = os.stat(fpath).st_mode
-                        if mode & 0o002:  # world-writable
-                            findings.append({
-                                'findingType': 'WORLD_WRITABLE_EXEC',
-                                'severity': 'HIGH',
-                                'description': f'Executável com permissão de escrita global: {fpath}',
-                                'evidence': f'Mode: {oct(mode)}',
-                                'mitreId': 'T1222'
-                            })
-                    except Exception:
-                        continue
-            except PermissionError:
-                continue
-    except Exception:
-        pass
-    return findings
-
-
-def detect_battery_and_device_info():
-    """Collect device battery and temperature as telemetry info findings."""
-    findings = []
-    try:
-        bat_path = '/sys/class/power_supply/battery'
-        if os.path.exists(bat_path):
-            level = ''
-            status = ''
-            temp = ''
-            try:
-                with open(f'{bat_path}/capacity', 'r') as f:
-                    level = f.read().strip()
-            except Exception:
-                pass
-            try:
-                with open(f'{bat_path}/status', 'r') as f:
-                    status = f.read().strip()
-            except Exception:
-                pass
-            try:
-                with open(f'{bat_path}/temp', 'r') as f:
-                    raw = f.read().strip()
-                    temp = f"{int(raw) / 10.0}°C"
-            except Exception:
-                pass
-            if level and int(level) < 15:
-                findings.append({
-                    'findingType': 'LOW_BATTERY',
-                    'severity': 'WARNING',
-                    'description': f'Bateria baixa: {level}% ({status})',
-                    'evidence': f'Nível: {level}%, Status: {status}, Temp: {temp}',
-                    'mitreId': 'N/A'
-                })
-            findings.append({
-                'findingType': 'DEVICE_BATTERY_STATUS',
-                'severity': 'INFO',
-                'description': f'Bateria: {level}% | Status: {status} | Temp: {temp}',
-                'evidence': f'{bat_path}',
-                'mitreId': 'N/A'
-                })
-    except Exception:
-        pass
-    return findings
-
-
-def detect_developer_options():
-    """Detect if Android developer options and USB debugging are enabled."""
-    findings = []
-    try:
-        checks = [
-            ('adb_enabled', 'USB Debugging (ADB) está HABILITADO'),
-            ('development_settings_enabled', 'Opções de Desenvolvedor estão HABILITADAS'),
-            ('install_non_market_apps', 'Instalação de fontes desconhecidas HABILITADA'),
-        ]
-        for prop, desc in checks:
-            try:
-                res = subprocess.run(['settings', 'get', 'global', prop], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=2)
-                if res.returncode == 0 and res.stdout.strip() == '1':
-                    findings.append({
-                        'findingType': 'DEV_OPTIONS_ENABLED',
-                        'severity': 'WARNING' if 'ADB' in desc else 'INFO',
-                        'description': desc,
-                        'evidence': f'{prop} = 1',
-                        'mitreId': 'T1456'
-                    })
-            except Exception:
-                continue
-    except Exception:
-        pass
-    return findings
-
-
-def detect_screen_lock_status():
-    """Check if screen lock is configured."""
-    findings = []
-    try:
-        res = subprocess.run(['settings', 'get', 'secure', 'lockscreen.password_type'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=2)
-        if res.returncode == 0:
-            val = res.stdout.strip()
-            if val in ('0', '65536', 'null', ''):
-                findings.append({
-                    'findingType': 'NO_SCREEN_LOCK',
-                    'severity': 'HIGH',
-                    'description': 'Dispositivo NÃO possui bloqueio de tela configurado!',
-                    'evidence': f'lockscreen.password_type = {val}',
-                    'mitreId': 'T1461'
-                })
-    except Exception:
-        pass
-    return findings
-
-
-def detect_installed_security_apps():
-    """Check for known security/antivirus apps installed."""
-    findings = []
-    security_apps = {
-        'com.lookout': 'Lookout Security',
-        'com.avast.android.mobilesecurity': 'Avast Antivirus',
-        'com.bitdefender.security': 'Bitdefender',
-        'com.kaspersky.security.cloud': 'Kaspersky',
-        'org.malwarebytes.antimalware': 'Malwarebytes',
-        'com.eset.ems2.gp': 'ESET Mobile Security',
-        'com.norton.engine': 'Norton Mobile',
-        'com.sophos.smsec': 'Sophos Mobile',
-    }
-    found = []
-    try:
-        res = subprocess.run(['pm', 'list', 'packages'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5)
-        if res.returncode == 0:
-            pkgs = res.stdout
-            for pkg, name in security_apps.items():
-                if pkg in pkgs:
-                    found.append(name)
-    except Exception:
-        pass
-
-    if found:
-        findings.append({
-            'findingType': 'SECURITY_APP_INSTALLED',
-            'severity': 'INFO',
-            'description': f'Apps de segurança instalados: {", ".join(found)}',
-            'evidence': ', '.join(found),
-            'mitreId': 'N/A'
-        })
-    else:
-        findings.append({
-            'findingType': 'NO_SECURITY_APP',
-            'severity': 'WARNING',
-            'description': 'Nenhum aplicativo de segurança/antivírus detectado no dispositivo',
-            'evidence': 'pm list packages não contém nenhum pacote de segurança conhecido',
-            'mitreId': 'T1629.003'
-        })
-    return findings
-
-
-def detect_active_wifi_info():
-    """Detect current Wi-Fi connection details."""
-    findings = []
-    try:
-        res = subprocess.run(['dumpsys', 'wifi'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=3)
-        if res.returncode == 0 and res.stdout:
-            ssid = ''
-            bssid = ''
-            freq = ''
-            for line in res.stdout.split('\n'):
-                l = line.strip()
-                if 'mWifiInfo' in l or 'SSID:' in l:
-                    m = re.search(r'SSID:\s*"?([^"\s,]+)', l)
-                    if m:
-                        ssid = m.group(1)
-                if 'BSSID:' in l:
-                    m = re.search(r'BSSID:\s*([0-9a-f:]+)', l, re.IGNORECASE)
-                    if m:
-                        bssid = m.group(1)
-                if 'Frequency:' in l:
-                    m = re.search(r'Frequency:\s*(\d+)', l)
-                    if m:
-                        freq = f"{m.group(1)}MHz"
-            if ssid:
-                findings.append({
-                    'findingType': 'WIFI_CONNECTION',
-                    'severity': 'INFO',
-                    'description': f'Conectado ao Wi-Fi: {ssid} ({bssid}) @ {freq}',
-                    'evidence': f'SSID={ssid}, BSSID={bssid}, Freq={freq}',
-                    'mitreId': 'N/A'
-                })
-    except Exception:
-        pass
-    return findings
-
-
 def collect_all_security_findings():
     """Run all deep security detection modules."""
     all_findings = []
@@ -1393,14 +1147,6 @@ def collect_all_security_findings():
     all_findings.extend(detect_promiscuous_interfaces())
     all_findings.extend(detect_global_process_tracers())
     all_findings.extend(detect_unlinked_memory_executables())
-    all_findings.extend(detect_running_vpn())
-    all_findings.extend(detect_open_listening_ports())
-    all_findings.extend(detect_world_writable_executables())
-    all_findings.extend(detect_battery_and_device_info())
-    all_findings.extend(detect_developer_options())
-    all_findings.extend(detect_screen_lock_status())
-    all_findings.extend(detect_installed_security_apps())
-    all_findings.extend(detect_active_wifi_info())
     return all_findings
 
 
@@ -1443,49 +1189,13 @@ def kill_old_agent_processes():
 
 def main():
     kill_old_agent_processes()
-    config_dir = os.path.expanduser("~/.guardian")
-    os.makedirs(config_dir, exist_ok=True)
-    config_file = os.path.join(config_dir, "server_url.txt")
-
-    server_ip = None
-
-    # 1. Argumento da linha de comando
-    if len(sys.argv) > 1 and sys.argv[1].strip():
-        server_ip = sys.argv[1].strip()
-        try:
-            with open(config_file, "w") as f:
-                f.write(server_ip)
-        except Exception:
-            pass
-
-    # 2. Variável de ambiente
-    if not server_ip and os.environ.get("GUARDIAN_SERVER"):
-        server_ip = os.environ.get("GUARDIAN_SERVER").strip()
-
-    # 3. Arquivo de configuração persistente
-    if not server_ip and os.path.exists(config_file):
-        try:
-            with open(config_file, "r") as f:
-                server_ip = f.read().strip()
-        except Exception:
-            pass
-
-    # 4. Prompt interativo se stdin for um terminal real
-    if not server_ip and sys.stdin.isatty():
+    if len(sys.argv) > 1:
+        server_ip = sys.argv[1]
+    else:
         try:
             server_ip = input("Digite o IP da maquina mestre (ex: 192.168.50.140): ").strip()
-            if server_ip:
-                try:
-                    with open(config_file, "w") as f:
-                        f.write(server_ip)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-    # Fallback se nenhum IP for fornecido
-    if not server_ip:
-        server_ip = "192.168.50.140"
+        except EOFError:
+            server_ip = "127.0.0.1"
 
     if not server_ip.startswith("http"):
         server_url = f"http://{server_ip}:4000"
@@ -1556,7 +1266,7 @@ def main():
         except Exception as e:
             print(f"[WARN] Heartbeat falhou: {e}")
 
-        time.sleep(20)
+        time.sleep(30)
 
 if __name__ == "__main__":
     main()

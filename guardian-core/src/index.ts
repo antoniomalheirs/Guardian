@@ -297,7 +297,9 @@ function getLocalSubnets(): string[] {
 // Broadcast Real-time Server-Sent Events (SSE)
 function broadcastSSE(event: string, data: any) {
   const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-  sseClients.forEach((res) => res.write(payload));
+  sseClients = sseClients.filter((res) => {
+    try { res.write(payload); return true; } catch { return false; }
+  });
 }
 
 // Security Token Authentication Middleware
@@ -592,7 +594,7 @@ async function evaluateATTACKRules(agent: AgentRecord, payload: TelemetryPayload
 
   // ═══ 10. Cryptominer Detection [T1496] ═══
   if (payload.cpuUsagePct > 85) {
-    const topProc = procs.sort((a, b) => b.cpuPct - a.cpuPct)[0];
+    const topProc = [...procs].sort((a, b) => b.cpuPct - a.cpuPct)[0];
     if (topProc && !KNOWN_SYSTEM_PROCS.has(topProc.name.toLowerCase())) {
       await fireAlert(agent, 'RULE-MINER-017', 'Cryptominer High CPU Anomaly', 'HIGH',
         `CPU do endpoint em ${payload.cpuUsagePct.toFixed(1)}% — processo principal: ${topProc.name} (PID ${topProc.pid}, CPU: ${topProc.cpuPct.toFixed(1)}%)`);
@@ -716,7 +718,7 @@ async function performDeepNetworkDiscovery(targetSubnet: string): Promise<Discov
     }
 
     const arpEntry = arpNeighbors.find((a) => a.ip === targetIp);
-    const mac = arpEntry ? arpEntry.mac : '00-15-5D-REAL-IP';
+    const mac = arpEntry ? arpEntry.mac : '00:00:00:00:00:00';
     const lastOctet = parseInt(targetIp.split('.')[3] || '0', 10);
 
     const threats: string[] = [];
@@ -751,7 +753,7 @@ async function performDeepNetworkDiscovery(targetSubnet: string): Promise<Discov
       vendorName = `Impressora de Rede IPP (${targetIp})`;
     } else if (openPorts.includes(135) || openPorts.includes(445) || openPorts.includes(139)) {
       deviceType = 'WINDOWS';
-      vendorName = targetIp.endsWith('.140') ? `Estação Windows Principal (${targetIp})` : `Estação Windows da Rede (${targetIp})`;
+      vendorName = `Estação Windows da Rede (${targetIp})`;
     } else if (openPorts.includes(22)) {
       deviceType = 'LINUX';
       vendorName = `Servidor Linux / Device SSH (${targetIp})`;
@@ -789,42 +791,121 @@ async function performDeepNetworkDiscovery(targetSubnet: string): Promise<Discov
 
 // POST /api/v1/network/scan (Deep Network Discovery Engine)
 app.post('/api/v1/network/scan', async (req: Request, res: Response) => {
-  const detectedSubnets = getLocalSubnets();
-  const targetSubnet = req.body.subnet || detectedSubnets[0] || '192.168.50';
+  try {
+    const detectedSubnets = getLocalSubnets();
+    const targetSubnet = req.body.subnet || detectedSubnets[0] || '192.168.50';
 
-  const devices = await performDeepNetworkDiscovery(targetSubnet);
+    const devices = await performDeepNetworkDiscovery(targetSubnet);
 
-  res.json({
-    scanId: `scan-${Date.now()}`,
-    subnet: `${targetSubnet}.0/24`,
-    scannedAt: new Date().toISOString(),
-    totalDiscovered: devices.length,
-    devices,
-  });
+    res.json({
+      scanId: `scan-${Date.now()}`,
+      subnet: `${targetSubnet}.0/24`,
+      scannedAt: new Date().toISOString(),
+      totalDiscovered: devices.length,
+      devices,
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to perform network scan' });
+  }
 });
 
 // GET /api/v1/network/scan/latest
 app.get('/api/v1/network/scan/latest', async (_req: Request, res: Response) => {
-  if (discoveredDevices.length === 0) {
-    discoveredDevices = await loadDiscoveredDevicesFromDb();
+  try {
+    if (discoveredDevices.length === 0) {
+      discoveredDevices = await loadDiscoveredDevicesFromDb();
+    }
+    if (discoveredDevices.length === 0) {
+      const detectedSubnets = getLocalSubnets();
+      await performDeepNetworkDiscovery(detectedSubnets[0] || '192.168.50');
+    }
+    res.json(discoveredDevices);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to retrieve latest network scan' });
   }
-  if (discoveredDevices.length === 0) {
-    const detectedSubnets = getLocalSubnets();
-    await performDeepNetworkDiscovery(detectedSubnets[0] || '192.168.50');
-  }
-  res.json(discoveredDevices);
 });
 
-// GET /download/agent.py (Direct HTTP Download Endpoint for Android Phones / Termux)
-app.get('/download/agent.py', (_req: Request, res: Response) => {
-  const agentPath = path.join(process.cwd(), '..', 'guardian-agent', 'guardian_termux_agent.py');
-  if (fs.existsSync(agentPath)) {
-    res.setHeader('Content-Type', 'text/plain');
-    res.sendFile(agentPath);
-  } else {
-    res.status(404).send('Agent script file not found');
+// Helper to resolve guardian_termux_agent.py dynamically regardless of working directory
+function findAgentPyPath(): string | null {
+  const candidates = [
+    path.join(process.cwd(), 'guardian-agent', 'guardian_termux_agent.py'),
+    path.join(process.cwd(), '..', 'guardian-agent', 'guardian_termux_agent.py'),
+    path.resolve('..', 'guardian-agent', 'guardian_termux_agent.py'),
+    path.resolve('guardian-agent', 'guardian_termux_agent.py'),
+    path.join(__dirname, '..', 'public', 'agent.py'),
+    path.join(process.cwd(), 'public', 'agent.py'),
+    path.join(__dirname, '..', '..', 'guardian-agent', 'guardian_termux_agent.py'),
+    path.join(__dirname, '..', 'guardian-agent', 'guardian_termux_agent.py'),
+  ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
   }
-});
+  return null;
+}
+
+function findInstallShPath(): string | null {
+  const candidates = [
+    path.join(process.cwd(), 'guardian-agent', 'install-android.sh'),
+    path.join(process.cwd(), '..', 'guardian-agent', 'install-android.sh'),
+    path.resolve('..', 'guardian-agent', 'install-android.sh'),
+    path.resolve('guardian-agent', 'install-android.sh'),
+    path.join(__dirname, '..', 'public', 'install-android.sh'),
+    path.join(__dirname, '..', '..', 'guardian-agent', 'install-android.sh'),
+    path.join(__dirname, '..', 'guardian-agent', 'install-android.sh'),
+  ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+// GET /download/install.sh (Dynamic Installer Endpoint for Android / Termux)
+const handleInstallScriptDownload = (req: Request, res: Response) => {
+  const installPath = findInstallShPath();
+  if (installPath && fs.existsSync(installPath)) {
+    let scriptContent = fs.readFileSync(installPath, 'utf-8');
+    const protocol = req.protocol || 'http';
+    const host = req.headers.host || `localhost:${PORT}`;
+    const serverUrl = `${protocol}://${host}`;
+    scriptContent = scriptContent.replace(/http:\/\/192\.168\.50\.140:4000/g, serverUrl);
+
+    res.setHeader('Content-Type', 'text/x-shellscript; charset=utf-8');
+    res.send(scriptContent);
+  } else {
+    res.status(404).send('Install script file not found on server');
+  }
+};
+
+// GET /download/agent.py (Direct HTTP Download Endpoint for Android Phones / Termux)
+const handleAgentDownload = (_req: Request, res: Response) => {
+  const agentPath = findAgentPyPath();
+  if (agentPath && fs.existsSync(agentPath)) {
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="agent.py"');
+    res.sendFile(path.resolve(agentPath), (err) => {
+      if (err && !res.headersSent) {
+        res.status(500).json({ error: 'Failed to send agent file' });
+      }
+    });
+  } else {
+    res.status(404).send('Agent script file not found on server');
+  }
+};
+
+app.get('/download/agent.py', handleAgentDownload);
+app.get('/download/agent', handleAgentDownload);
+app.get('/agent.py', handleAgentDownload);
+
+app.get('/download/install.sh', handleInstallScriptDownload);
+app.get('/download/android.sh', handleInstallScriptDownload);
+app.get('/download/install', handleInstallScriptDownload);
+app.get('/download/android', handleInstallScriptDownload);
+app.get('/install.sh', handleInstallScriptDownload);
+app.get('/android.sh', handleInstallScriptDownload);
+app.get('/install', handleInstallScriptDownload);
+app.get('/android', handleInstallScriptDownload);
+
+
 
 // GET /api/v1/stream (Server-Sent Events Real-Time Live Feed)
 app.get('/api/v1/stream', (req: Request, res: Response) => {
@@ -873,14 +954,33 @@ app.get('/api/v1/stats', (_req: Request, res: Response) => {
 
 // GET /api/v1/agents
 app.get('/api/v1/agents', (_req: Request, res: Response) => {
-  res.json(Array.from(agents.values()));
+  const now = Date.now();
+  const agentList: AgentRecord[] = [];
+  for (const ag of agents.values()) {
+    const lastHbMs = new Date(ag.lastHeartbeat).getTime();
+    const isStale = (now - lastHbMs) > 20000; // >20s without heartbeat
+    const copy: AgentRecord = {
+      ...ag,
+      status: ag.status === 'isolated' ? 'isolated' : isStale ? 'offline' : ag.status
+    };
+    if (isStale && ag.status !== 'isolated') {
+      copy.topProcesses = [];
+      copy.networkConnections = [];
+      copy.fileEvents = [];
+    }
+    agentList.push(copy);
+  }
+  res.json(agentList);
 });
 
-// GET /api/v1/processes
+// GET /api/v1/processes (ONLY LIVE ONLINE AGENTS)
 app.get('/api/v1/processes', (_req: Request, res: Response) => {
+  const now = Date.now();
   const allProcesses: Array<ProcessTelemetry & { hostname: string; agentId: string }> = [];
   for (const agent of agents.values()) {
-    if (agent.topProcesses) {
+    const lastHbMs = new Date(agent.lastHeartbeat).getTime();
+    const isOnline = (now - lastHbMs) <= 20000;
+    if (isOnline && agent.status !== 'isolated' && agent.topProcesses) {
       for (const proc of agent.topProcesses) {
         allProcesses.push({
           ...proc,
@@ -893,11 +993,14 @@ app.get('/api/v1/processes', (_req: Request, res: Response) => {
   res.json(allProcesses);
 });
 
-// GET /api/v1/network
+// GET /api/v1/network (ONLY LIVE ONLINE AGENTS)
 app.get('/api/v1/network', (_req: Request, res: Response) => {
+  const now = Date.now();
   const allConnections: Array<NetworkTelemetry & { hostname: string; agentId: string }> = [];
   for (const agent of agents.values()) {
-    if (agent.networkConnections) {
+    const lastHbMs = new Date(agent.lastHeartbeat).getTime();
+    const isOnline = (now - lastHbMs) <= 20000;
+    if (isOnline && agent.status !== 'isolated' && agent.networkConnections) {
       for (const conn of agent.networkConnections) {
         allConnections.push({
           ...conn,
@@ -910,11 +1013,14 @@ app.get('/api/v1/network', (_req: Request, res: Response) => {
   res.json(allConnections);
 });
 
-// GET /api/v1/files
+// GET /api/v1/files (ONLY LIVE ONLINE AGENTS)
 app.get('/api/v1/files', (_req: Request, res: Response) => {
+  const now = Date.now();
   const allFiles: Array<FileTelemetry & { hostname: string; agentId: string }> = [];
   for (const agent of agents.values()) {
-    if (agent.fileEvents) {
+    const lastHbMs = new Date(agent.lastHeartbeat).getTime();
+    const isOnline = (now - lastHbMs) <= 20000;
+    if (isOnline && agent.status !== 'isolated' && agent.fileEvents) {
       for (const fileEvt of agent.fileEvents) {
         allFiles.push({
           ...fileEvt,
@@ -972,12 +1078,12 @@ app.post('/api/v1/response/kill', (req: Request, res: Response) => {
 });
 
 // POST /api/v1/response/isolate
-app.post('/api/v1/response/isolate', (req: Request, res: Response) => {
+app.post('/api/v1/response/isolate', async (req: Request, res: Response) => {
   const { agentId } = req.body;
   const agent = agents.get(agentId);
   if (agent) {
     agent.status = 'isolated';
-    saveAgentToDb(agent);
+    await saveAgentToDb(agent);
   }
   console.log(`🔒 Network isolation command sent to agent ${agentId}`);
   res.json({ status: 'isolated', agentId });
@@ -1052,15 +1158,9 @@ app.post('/api/v1/agents/heartbeat', verifyAgentToken, async (req: Request, res:
     diskUsagePct: payload.diskUsagePct,
     activeProcessesCount: payload.activeProcessesCount,
   };
-  if (payload.topProcesses && payload.topProcesses.length > 0) {
-    agent.topProcesses = payload.topProcesses;
-  }
-  if (payload.networkConnections && payload.networkConnections.length > 0) {
-    agent.networkConnections = payload.networkConnections;
-  }
-  if (payload.fileEvents && payload.fileEvents.length > 0) {
-    agent.fileEvents = payload.fileEvents;
-  }
+  agent.topProcesses = payload.topProcesses || [];
+  agent.networkConnections = payload.networkConnections || [];
+  agent.fileEvents = payload.fileEvents || [];
 
   // Evaluate Telemetry against Real-Time ATT&CK Correlation Engine
   await evaluateATTACKRules(agent, payload);
@@ -1084,9 +1184,29 @@ initDatabase().then(async () => {
   }
   discoveredDevices = await loadDiscoveredDevicesFromDb();
 
-  app.listen(PORT, async () => {
+  // Background Live Agent Lifecycle & Cleanup Loop (runs every 10s)
+  setInterval(async () => {
+    const now = Date.now();
+    for (const [agentId, agent] of agents.entries()) {
+      const lastHbMs = new Date(agent.lastHeartbeat).getTime();
+      const elapsed = now - lastHbMs;
+
+      if (elapsed > 20000 && (agent.status === 'online' || agent.status === 'warning')) {
+        agent.status = 'offline';
+        agent.topProcesses = [];
+        agent.networkConnections = [];
+        agent.fileEvents = [];
+        await saveAgentToDb(agent);
+        broadcastSSE('agent_updated', agent);
+        console.log(`⚠️ Agente ${agent.hostname} (${agentId}) marcado como OFFLINE por timeout de heartbeat (${Math.round(elapsed / 1000)}s sem comunicação)`);
+      }
+    }
+  }, 10000);
+
+  app.listen(Number(PORT), '0.0.0.0', async () => {
     const detectedSubnets = getLocalSubnets();
-    console.log(`🛡️ Guardian Core API Server running on port ${PORT} [MITRE ATT&CK Engine Active]`);
+    console.log(`🛡️ Guardian Core API Server running on 0.0.0.0:${PORT} [MITRE ATT&CK Engine Active]`);
+
     console.log(`📡 Detected subnets (priority order): ${detectedSubnets.join(', ')}`);
     
     // Scan ALL physical subnets on startup to find all devices

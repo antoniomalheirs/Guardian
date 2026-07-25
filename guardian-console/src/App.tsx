@@ -29,7 +29,8 @@ import {
   Filter,
   Copy,
   Info,
-  ChevronRight
+  ChevronRight,
+  Smartphone
 } from 'lucide-react';
 
 interface ProcessTelemetry {
@@ -125,7 +126,7 @@ interface EDRAlert {
 }
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'agentless' | 'network_map' | 'mitre_matrix' | 'endpoints' | 'processes' | 'network' | 'files' | 'rules'>('agentless');
+  const [activeTab, setActiveTab] = useState<'endpoints' | 'agentless' | 'network_map' | 'mitre_matrix' | 'processes' | 'network' | 'files' | 'rules'>('endpoints');
   const [selectedHostFilter, setSelectedHostFilter] = useState<string>('ALL');
   const [selectedProcessDetails, setSelectedProcessDetails] = useState<ProcessTelemetry | null>(null);
 
@@ -139,6 +140,7 @@ export default function App() {
   const [scanningNetwork, setScanningNetwork] = useState(false);
   const [loading, setLoading] = useState(false);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [detectedSubnet, setDetectedSubnet] = useState<string>('192.168.50');
 
   // New Rule Modal State
   const [showAddRule, setShowAddRule] = useState(false);
@@ -148,9 +150,21 @@ export default function App() {
   const [newRuleSeverity, setNewRuleSeverity] = useState<'INFO' | 'WARNING' | 'HIGH' | 'CRITICAL'>('HIGH');
   const [newRuleDescription, setNewRuleDescription] = useState('');
 
+  // Android Install Modal State
+  const [showAndroidInstallModal, setShowAndroidInstallModal] = useState(false);
+  const [copiedCmd, setCopiedCmd] = useState(false);
+
   const fetchData = async () => {
     setLoading(true);
     try {
+      const healthRes = await fetch('http://localhost:4000/api/v1/health');
+      if (healthRes.ok) {
+        const healthData = await healthRes.json();
+        if (healthData.detectedSubnets && healthData.detectedSubnets.length > 0) {
+          setDetectedSubnet(healthData.detectedSubnets[0]);
+        }
+      }
+
       const devRes = await fetch('http://localhost:4000/api/v1/network/scan/latest');
       if (devRes.ok) setAgentlessDevices(await devRes.json());
 
@@ -181,36 +195,43 @@ export default function App() {
   useEffect(() => {
     fetchData();
 
-    try {
-      const eventSource = new EventSource('http://localhost:4000/api/v1/stream');
-      
-      eventSource.addEventListener('alert', (e) => {
-        const newAlert = JSON.parse(e.data);
+    const eventSource = new EventSource('http://localhost:4000/api/v1/stream');
+    eventSource.addEventListener('alert', (e) => {
+      try {
+        const newAlert = JSON.parse((e as MessageEvent).data);
         setActionMessage(`🚨 AMEAÇA DETECTADA: ${newAlert.ruleName} no host ${newAlert.hostname}`);
         fetchData();
-      });
-
-      eventSource.addEventListener('network_scan_complete', (e) => {
-        setAgentlessDevices(JSON.parse(e.data));
+      } catch {}
+    });
+    eventSource.addEventListener('network_scan_complete', (e) => {
+      try {
+        const data = JSON.parse((e as MessageEvent).data);
+        if (Array.isArray(data)) setAgentlessDevices(data);
+        else if (data.devices) setAgentlessDevices(data.devices);
         setActionMessage(`📡 Varredura de Rede Concluída com Sucesso!`);
-      });
-
-      eventSource.addEventListener('telemetry', () => fetchData());
-      return () => eventSource.close();
-    } catch {
+      } catch {}
+    });
+    eventSource.addEventListener('telemetry', () => fetchData());
+    eventSource.onerror = () => {
+      eventSource.close();
       const interval = setInterval(fetchData, 10000);
-      return () => clearInterval(interval);
-    }
+      // Store for cleanup
+      (window as any).__guardianPollInterval = interval;
+    };
+    return () => {
+      eventSource.close();
+      if ((window as any).__guardianPollInterval) clearInterval((window as any).__guardianPollInterval);
+    };
   }, []);
 
   const triggerAgentlessScan = async () => {
     setScanningNetwork(true);
-    setActionMessage(`📡 Iniciando Varredura Real na Sub-rede 192.168.50.0/24...`);
+    setActionMessage(`📡 Iniciando Varredura Real na Sub-rede ${detectedSubnet}.0/24...`);
     try {
       const res = await fetch('http://localhost:4000/api/v1/network/scan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ subnet: '192.168.50' }),
+        body: JSON.stringify({ subnet: detectedSubnet }),
       });
       if (res.ok) {
         const data = await res.json();
@@ -342,7 +363,7 @@ export default function App() {
               </span>
             </div>
             <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
-              Sub-rede Local Detectada: <strong style={{ color: '#34d399' }}>192.168.50.0/24 (D-Link Gateway 192.168.50.1)</strong>
+              Sub-rede Local Detectada: <strong style={{ color: '#34d399' }}>{detectedSubnet}.0/24 (Gateway {detectedSubnet}.1)</strong>
             </p>
           </div>
         </div>
@@ -354,7 +375,15 @@ export default function App() {
             style={{ background: 'linear-gradient(135deg, #10b981, #059669)', color: '#ffffff', border: 'none', padding: '10px 20px', borderRadius: '10px', fontSize: '0.85rem', fontWeight: 700, cursor: scanningNetwork ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', gap: '8px', boxShadow: '0 4px 15px rgba(16, 185, 129, 0.3)' }}
           >
             <Wifi size={16} className={scanningNetwork ? 'animate-spin' : ''} />
-            {scanningNetwork ? 'Varrendo Sub-rede 192.168.50.0/24...' : 'Escanear Rede Real (192.168.50.0/24)'}
+            {scanningNetwork ? `Varrendo Sub-rede ${detectedSubnet}.0/24...` : `Escanear Rede Real (${detectedSubnet}.0/24)`}
+          </button>
+
+          <button
+            onClick={() => setShowAndroidInstallModal(true)}
+            style={{ background: 'linear-gradient(135deg, #06b6d4, #3b82f6)', color: '#ffffff', border: 'none', padding: '10px 18px', borderRadius: '10px', fontSize: '0.85rem', fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', boxShadow: '0 4px 15px rgba(6, 182, 212, 0.3)' }}
+          >
+            <Smartphone size={16} />
+            Instalar no Android (Termux)
           </button>
 
           <button 
@@ -372,24 +401,6 @@ export default function App() {
       {/* Navigation Tabs */}
       <div style={{ display: 'flex', gap: '12px', marginBottom: '24px', flexWrap: 'wrap' }}>
         <button
-          onClick={() => setActiveTab('agentless')}
-          className="glass-panel"
-          style={{
-            padding: '10px 20px',
-            borderRadius: '12px',
-            color: activeTab === 'agentless' ? 'var(--accent-cyan)' : 'var(--text-secondary)',
-            borderColor: activeTab === 'agentless' ? 'var(--accent-cyan)' : 'var(--border-glass)',
-            background: activeTab === 'agentless' ? 'rgba(6, 182, 212, 0.12)' : 'var(--bg-card)',
-            fontWeight: 700,
-            display: 'flex',
-            alignItems: 'center',
-            gap: '8px',
-            cursor: 'pointer'
-          }}
-        >
-          <Globe size={16} color="#34d399" /> Dispositivos na Rede Real ({agentlessDevices.length})
-        </button>
-        <button
           onClick={() => setActiveTab('endpoints')}
           className="glass-panel"
           style={{
@@ -398,7 +409,7 @@ export default function App() {
             color: activeTab === 'endpoints' ? 'var(--accent-cyan)' : 'var(--text-secondary)',
             borderColor: activeTab === 'endpoints' ? 'var(--accent-cyan)' : 'var(--border-glass)',
             background: activeTab === 'endpoints' ? 'rgba(6, 182, 212, 0.12)' : 'var(--bg-card)',
-            fontWeight: 600,
+            fontWeight: 700,
             display: 'flex',
             alignItems: 'center',
             gap: '8px',
@@ -406,6 +417,24 @@ export default function App() {
           }}
         >
           <Monitor size={16} /> Agentes Instalados ({agents.length})
+        </button>
+        <button
+          onClick={() => setActiveTab('agentless')}
+          className="glass-panel"
+          style={{
+            padding: '10px 20px',
+            borderRadius: '12px',
+            color: activeTab === 'agentless' ? 'var(--accent-cyan)' : 'var(--text-secondary)',
+            borderColor: activeTab === 'agentless' ? 'var(--accent-cyan)' : 'var(--border-glass)',
+            background: activeTab === 'agentless' ? 'rgba(6, 182, 212, 0.12)' : 'var(--bg-card)',
+            fontWeight: 600,
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            cursor: 'pointer'
+          }}
+        >
+          <Globe size={16} color="#34d399" /> Dispositivos na Rede Real ({agentlessDevices.length})
         </button>
         <button
           onClick={() => setActiveTab('processes')}
@@ -526,7 +555,7 @@ export default function App() {
                 <Globe size={26} color="#34d399" />
                 <div>
                   <h2 style={{ fontSize: '1.2rem', fontWeight: 800, color: '#ffffff' }}>
-                    Auditoria e Proteção da Rede Real (192.168.50.0/24)
+                    Auditoria e Proteção da Rede Real ({detectedSubnet}.0/24)
                   </h2>
                   <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
                     Descoberta direta via ARP do Kernel do Windows e verificação de sockets sem qualquer dado fantasma ou cache.
@@ -543,7 +572,7 @@ export default function App() {
             <div className="glass-panel" style={{ padding: '40px', textAlign: 'center', color: 'var(--text-muted)' }}>
               <Wifi size={36} color="var(--accent-cyan)" style={{ marginBottom: '12px' }} />
               <h3>Nenhum dispositivo encontrado no Banco de Dados SQL.</h3>
-              <p style={{ fontSize: '0.85rem', marginTop: '6px' }}>Clique no botão no topo <strong>"Escanear Rede Real (192.168.50.0/24)"</strong> para varrer sua rede agora!</p>
+              <p style={{ fontSize: '0.85rem', marginTop: '6px' }}>Clique no botão no topo <strong>"Escanear Rede Real ({detectedSubnet}.0/24)"</strong> para varrer sua rede agora!</p>
             </div>
           ) : (
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(360px, 1fr))', gap: '20px' }}>
@@ -570,16 +599,16 @@ export default function App() {
                     </div>
                     <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                       <span style={{ color: 'var(--text-muted)' }}>Portas Abertas Auditadas:</span>
-                      <strong className="mono-text" style={{ color: '#34d399' }}>{dev.openPorts.length > 0 ? dev.openPorts.join(', ') : 'Nenhuma porta perigosa aberta'}</strong>
+                      <strong className="mono-text" style={{ color: '#34d399' }}>{(dev.openPorts || []).length > 0 ? (dev.openPorts || []).join(', ') : 'Nenhuma porta perigosa aberta'}</strong>
                     </div>
                   </div>
 
-                  {dev.detectedThreats.length > 0 ? (
+                  {(dev.detectedThreats || []).length > 0 ? (
                     <div style={{ background: 'rgba(244, 63, 94, 0.1)', border: '1px solid rgba(244, 63, 94, 0.3)', padding: '10px 12px', borderRadius: '8px' }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.75rem', color: '#f87171', fontWeight: 700, marginBottom: '4px' }}>
                         <AlertCircle size={14} /> Vulnerabilidades Detectadas:
                       </div>
-                      {dev.detectedThreats.map((threat, tIdx) => (
+                      {(dev.detectedThreats || []).map((threat, tIdx) => (
                         <p key={tIdx} style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginLeft: '20px' }}>
                           • {threat}
                         </p>
@@ -610,22 +639,22 @@ export default function App() {
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '14px' }}>
                   <div>
                     <h3 style={{ fontSize: '1.1rem', fontWeight: 700, color: '#fff' }}>{agent.hostname}</h3>
-                    <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '4px' }}>{agent.inventory.osName} ({agent.inventory.osVersion})</p>
+                    <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '4px' }}>{agent.inventory?.osName} ({agent.inventory?.osVersion})</p>
                   </div>
                   <span className={`badge ${agent.status === 'online' ? 'badge-online' : 'badge-warning'}`}>{agent.status}</span>
                 </div>
                 <div style={{ background: 'rgba(0, 0, 0, 0.2)', padding: '12px', borderRadius: '10px', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
                     <span>IP do Endpoint:</span>
-                    <strong className="mono-text" style={{ color: '#fff' }}>{agent.inventory.ipAddress || '192.168.50.140'}</strong>
+                    <strong className="mono-text" style={{ color: '#fff' }}>{agent.inventory?.ipAddress || 'N/A'}</strong>
                   </div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
                     <span>Processos Monitorados:</span>
-                    <strong style={{ color: 'var(--accent-cyan)' }}>{agent.metrics.activeProcessesCount || 0}</strong>
+                    <strong style={{ color: 'var(--accent-cyan)' }}>{agent.metrics?.activeProcessesCount || 0}</strong>
                   </div>
                   <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                     <span>Uso de CPU / RAM:</span>
-                    <strong style={{ color: '#34d399' }}>{agent.metrics.cpuUsagePct || 0}% / {agent.metrics.memoryUsagePct || 0}%</strong>
+                    <strong style={{ color: '#34d399' }}>{agent.metrics?.cpuUsagePct || 0}% / {agent.metrics?.memoryUsagePct || 0}%</strong>
                   </div>
                 </div>
                 <div style={{ marginTop: '16px', display: 'flex', gap: '10px' }}>
@@ -695,7 +724,7 @@ export default function App() {
                       cursor: 'pointer'
                     }}
                   >
-                    {agent.inventory.osName.includes('Android') ? '📱' : '🖥️'} {agent.hostname} ({count})
+                    {agent.inventory?.osName.includes('Android') ? '📱' : '🖥️'} {agent.hostname} ({count})
                   </button>
                 );
               })}
@@ -738,7 +767,7 @@ export default function App() {
                       <td className="mono-text" style={{ padding: '12px', color: 'var(--accent-cyan)', fontWeight: 700 }}>{proc.pid}</td>
                       <td style={{ padding: '12px', fontWeight: 700, color: '#fff' }}>{proc.name}</td>
                       <td className="mono-text" style={{ padding: '12px', color: 'var(--text-secondary)', fontSize: '0.75rem' }}>{proc.executablePath || 'N/A (Kernel/System)'}</td>
-                      <td style={{ padding: '12px', color: proc.cpuPct > 50 ? '#f87171' : '#34d399' }}>{proc.cpuPct.toFixed(1)}%</td>
+                      <td style={{ padding: '12px', color: proc.cpuPct > 50 ? '#f87171' : '#34d399' }}>{(proc.cpuPct || 0).toFixed(1)}%</td>
                       <td style={{ padding: '12px', color: '#fff' }}>{proc.memoryMb} MB</td>
                       <td className="mono-text" style={{ padding: '12px', color: 'var(--text-muted)', fontSize: '0.7rem' }}>
                         {proc.sha256Hash ? proc.sha256Hash.substring(0, 16) + '...' : 'N/A'}
@@ -747,7 +776,7 @@ export default function App() {
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
-                            handleKillProcess(proc.agentId || 'agent-sentinelpc', proc.pid);
+                            handleKillProcess(proc.agentId || '', proc.pid);
                           }}
                           style={{ background: 'rgba(244, 63, 94, 0.15)', border: '1px solid rgba(244, 63, 94, 0.4)', color: '#f87171', padding: '6px 12px', borderRadius: '6px', fontSize: '0.75rem', fontWeight: 700, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
                         >
@@ -809,7 +838,7 @@ export default function App() {
                       cursor: 'pointer'
                     }}
                   >
-                    {agent.inventory.osName.includes('Android') ? '📱' : '🖥️'} {agent.hostname} ({count})
+                    {agent.inventory?.osName.includes('Android') ? '📱' : '🖥️'} {agent.hostname} ({count})
                   </button>
                 );
               })}
@@ -907,7 +936,7 @@ export default function App() {
                       cursor: 'pointer'
                     }}
                   >
-                    {agent.inventory.osName.includes('Android') ? '📱' : '🖥️'} {agent.hostname} ({count})
+                    {agent.inventory?.osName.includes('Android') ? '📱' : '🖥️'} {agent.hostname} ({count})
                   </button>
                 );
               })}
@@ -964,7 +993,7 @@ export default function App() {
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <div>
                 <h2 style={{ fontSize: '1.2rem', fontWeight: 800, color: '#ffffff', display: 'flex', alignItems: 'center', gap: '10px' }}>
-                  <Network size={24} color="#38bdf8" /> Mapa de Topologia de Rede e Risco dos Ativos (192.168.50.0/24)
+                  <Network size={24} color="#38bdf8" /> Mapa de Topologia de Rede e Risco dos Ativos ({detectedSubnet}.0/24)
                 </h2>
                 <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
                   Visualização gráfica em tempo real da infraestrutura de rede, nós ativos, agentes instalados e auras de risco por portas expostas.
@@ -991,7 +1020,7 @@ export default function App() {
             }}>
               <Globe size={28} style={{ marginBottom: '4px' }} />
               <div style={{ fontWeight: 800, fontSize: '1.1rem' }}>Roteador Gateway Principal</div>
-              <div className="mono-text" style={{ fontSize: '0.9rem', color: '#a7f3d0' }}>192.168.50.1 (D-Link / AP)</div>
+              <div className="mono-text" style={{ fontSize: '0.9rem', color: '#a7f3d0' }}>{detectedSubnet}.1 (Gateway)</div>
               <span className="badge badge-online" style={{ marginTop: '6px', fontSize: '0.7rem' }}>ONLINE • LATÊNCIA 1ms</span>
             </div>
 
@@ -1009,21 +1038,21 @@ export default function App() {
                 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '10px' }}>
                     <div style={{ background: 'rgba(56, 189, 248, 0.2)', padding: '8px', borderRadius: '10px' }}>
-                      {ag.inventory.osName.includes('Android') ? <Radio size={20} color="#34d399" /> : <Monitor size={20} color="#38bdf8" />}
+                      {ag.inventory?.osName.includes('Android') ? <Radio size={20} color="#34d399" /> : <Monitor size={20} color="#38bdf8" />}
                     </div>
                     <div>
                       <h4 style={{ color: '#fff', fontWeight: 700, fontSize: '0.95rem' }}>{ag.hostname}</h4>
-                      <span className="mono-text" style={{ fontSize: '0.75rem', color: '#38bdf8' }}>{ag.inventory.ipAddress}</span>
+                      <span className="mono-text" style={{ fontSize: '0.75rem', color: '#38bdf8' }}>{ag.inventory?.ipAddress}</span>
                     </div>
                   </div>
                   <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                    <div><strong>OS:</strong> {ag.inventory.osName}</div>
-                    <div><strong>MAC:</strong> <span className="mono-text">{ag.inventory.macAddress}</span></div>
+                    <div><strong>OS:</strong> {ag.inventory?.osName}</div>
+                    <div><strong>MAC:</strong> <span className="mono-text">{ag.inventory?.macAddress}</span></div>
                     <div><strong>Agente:</strong> EDR Ativo ({ag.status.toUpperCase()})</div>
                   </div>
                   <div style={{ marginTop: '12px', background: 'rgba(0,0,0,0.3)', padding: '8px', borderRadius: '8px', display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem' }}>
-                    <span>CPU: <strong style={{ color: '#38bdf8' }}>{ag.metrics.cpuUsagePct.toFixed(1)}%</strong></span>
-                    <span>RAM: <strong style={{ color: '#34d399' }}>{ag.metrics.memoryUsagePct.toFixed(1)}%</strong></span>
+                    <span>CPU: <strong style={{ color: '#38bdf8' }}>{(ag.metrics?.cpuUsagePct || 0).toFixed(1)}%</strong></span>
+                    <span>RAM: <strong style={{ color: '#34d399' }}>{(ag.metrics?.memoryUsagePct || 0).toFixed(1)}%</strong></span>
                   </div>
                 </div>
               ))}
@@ -1054,7 +1083,7 @@ export default function App() {
                     </div>
                     <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
                       <div><strong>MAC:</strong> <span className="mono-text">{dev.macAddress}</span></div>
-                      <div><strong>Portas Abertas:</strong> <span style={{ color: '#38bdf8' }}>{dev.openPorts.join(', ') || 'Nenhuma'}</span></div>
+                      <div><strong>Portas Abertas:</strong> <span style={{ color: '#38bdf8' }}>{(dev.openPorts || []).join(', ') || 'Nenhuma'}</span></div>
                     </div>
                   </div>
                 );
@@ -1338,6 +1367,71 @@ export default function App() {
                 <button type="submit" style={{ flex: 1, padding: '10px', background: 'linear-gradient(135deg, #06b6d4, #3b82f6)', border: 'none', color: '#fff', borderRadius: '8px', fontWeight: 700, cursor: 'pointer' }}>Salvar Regra</button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+      {/* Modal Android Installation */}
+      {showAndroidInstallModal && (
+        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0, 0, 0, 0.8)', backdropFilter: 'blur(10px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: '20px' }}>
+          <div className="glass-panel" style={{ padding: '32px', width: '100%', maxWidth: '650px', borderRadius: '16px', border: '1px solid var(--accent-cyan)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '16px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                <div style={{ background: 'linear-gradient(135deg, #06b6d4, #3b82f6)', padding: '10px', borderRadius: '12px' }}>
+                  <Smartphone size={24} color="#fff" />
+                </div>
+                <div>
+                  <h3 style={{ fontSize: '1.3rem', fontWeight: 800, color: '#fff' }}>Instalação Completa no Android (Termux)</h3>
+                  <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Instalação automatizada em 1-clique com persistência e execução em segundo plano</p>
+                </div>
+              </div>
+              <XCircle size={22} color="var(--text-muted)" style={{ cursor: 'pointer' }} onClick={() => setShowAndroidInstallModal(false)} />
+            </div>
+
+            <div style={{ background: 'rgba(0,0,0,0.4)', border: '1px solid rgba(6, 182, 212, 0.3)', padding: '16px', borderRadius: '12px', marginBottom: '20px' }}>
+              <span style={{ fontSize: '0.8rem', color: 'var(--accent-cyan)', fontWeight: 700, display: 'block', marginBottom: '8px' }}>
+                📋 COMANDO ÚNICO DE INSTALAÇÃO (COPIE E COLE NO TERMUX):
+              </span>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: '#090d16', padding: '12px 14px', borderRadius: '8px', border: '1px solid #1e293b' }}>
+                <code className="mono-text" style={{ fontSize: '0.85rem', color: '#34d399', wordBreak: 'break-all' }}>
+                  pkg install -y curl bash && curl -sSL http://{window.location.hostname}:4000/android.sh | bash
+                </code>
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(`pkg install -y curl bash && curl -sSL http://${window.location.hostname}:4000/android.sh | bash`);
+                    setCopiedCmd(true);
+                    setTimeout(() => setCopiedCmd(false), 3000);
+                  }}
+                  style={{ background: copiedCmd ? '#10b981' : 'linear-gradient(135deg, #06b6d4, #3b82f6)', color: '#fff', border: 'none', padding: '8px 14px', borderRadius: '6px', fontSize: '0.75rem', fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px', marginLeft: '12px', flexShrink: 0 }}
+                >
+                  {copiedCmd ? <Check size={14} /> : <Copy size={14} />}
+                  {copiedCmd ? 'Copiado!' : 'Copiar'}
+                </button>
+              </div>
+            </div>
+
+            <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '24px' }}>
+              <div style={{ display: 'flex', alignItems: 'flex-start', gap: '10px' }}>
+                <span style={{ background: 'rgba(6, 182, 212, 0.2)', color: 'var(--accent-cyan)', width: '22px', height: '22px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.75rem', fontWeight: 800, flexShrink: 0 }}>1</span>
+                <span>Abra o app <strong>Termux</strong> no celular Android (disponível no F-Droid ou APK oficial).</span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'flex-start', gap: '10px' }}>
+                <span style={{ background: 'rgba(6, 182, 212, 0.2)', color: 'var(--accent-cyan)', width: '22px', height: '22px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.75rem', fontWeight: 800, flexShrink: 0 }}>2</span>
+                <span>Cole o comando acima e pressione <strong>Enter</strong>. O script instalará o Python, configurará as dependências e o script de inicialização automaticamente.</span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'flex-start', gap: '10px' }}>
+                <span style={{ background: 'rgba(6, 182, 212, 0.2)', color: 'var(--accent-cyan)', width: '22px', height: '22px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.75rem', fontWeight: 800, flexShrink: 0 }}>3</span>
+                <span>O agente ativa automaticamente o <strong>termux-wake-lock</strong> e roda como daemon de fundo (24/7). Você poderá gerenciar via o comando <code>guardian status</code> ou <code>guardian logs</code> no Termux!</span>
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+              <button
+                onClick={() => setShowAndroidInstallModal(false)}
+                style={{ padding: '10px 24px', background: 'linear-gradient(135deg, #06b6d4, #3b82f6)', border: 'none', color: '#fff', borderRadius: '8px', fontWeight: 700, cursor: 'pointer' }}
+              >
+                Concluído
+              </button>
+            </div>
           </div>
         </div>
       )}
