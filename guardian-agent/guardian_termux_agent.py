@@ -23,8 +23,6 @@ import glob
 import subprocess
 import re
 
-VALID_AGENT_TOKEN = os.environ.get("GUARDIAN_AGENT_TOKEN", "GUARDIAN-SECRET-AGENT-KEY-v0.9")
-
 _ROOT_PROBE_DONE = False
 _ROOT_AVAILABLE = False
 
@@ -1707,10 +1705,7 @@ def send_post_request(url, data):
     req = urllib.request.Request(
         url,
         data=json.dumps(data).encode('utf-8'),
-        headers={
-            "Content-Type": "application/json",
-            "x-guardian-token": VALID_AGENT_TOKEN
-        },
+        headers={"Content-Type": "application/json"},
         method="POST"
     )
     with urllib.request.urlopen(req, timeout=10) as response:

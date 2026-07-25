@@ -126,13 +126,8 @@ interface EDRAlert {
 }
 
 const API_BASE_URL = import.meta.env.VITE_GUARDIAN_API_URL || 'http://localhost:4000';
-const ADMIN_TOKEN = import.meta.env.VITE_GUARDIAN_ADMIN_TOKEN || '';
-const AGENT_TOKEN = import.meta.env.VITE_GUARDIAN_AGENT_TOKEN || ADMIN_TOKEN;
-
 function guardianFetch(path: string, init: RequestInit = {}) {
-  const headers = new Headers(init.headers || {});
-  if (ADMIN_TOKEN) headers.set('x-guardian-admin-token', ADMIN_TOKEN);
-  return fetch(`${API_BASE_URL}${path}`, { ...init, headers });
+  return fetch(`${API_BASE_URL}${path}`, init);
 }
 
 export default function App() {
@@ -164,7 +159,7 @@ export default function App() {
   const [showAndroidInstallModal, setShowAndroidInstallModal] = useState(false);
   const [copiedCmd, setCopiedCmd] = useState(false);
 
-  const androidInstallCommand = `pkg install -y curl bash && curl -sSL '${API_BASE_URL}/android.sh${ADMIN_TOKEN ? `?token=${encodeURIComponent(ADMIN_TOKEN)}` : ''}' | GUARDIAN_DOWNLOAD_TOKEN='${ADMIN_TOKEN}' GUARDIAN_AGENT_TOKEN='${AGENT_TOKEN}' bash`;
+  const androidInstallCommand = `pkg install -y curl bash && curl -sSL '${API_BASE_URL}/android.sh' | bash`;
 
   const fetchData = async () => {
     setLoading(true);
@@ -207,7 +202,7 @@ export default function App() {
   useEffect(() => {
     fetchData();
 
-    const eventSource = new EventSource(`${API_BASE_URL}/api/v1/stream${ADMIN_TOKEN ? `?token=${encodeURIComponent(ADMIN_TOKEN)}` : ''}`);
+    const eventSource = new EventSource(`${API_BASE_URL}/api/v1/stream`);
     eventSource.addEventListener('alert', (e) => {
       try {
         const newAlert = JSON.parse((e as MessageEvent).data);
