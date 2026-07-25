@@ -37,7 +37,7 @@ else
 fi
 
 # Solicitando acesso a armazenamento se estiver no Termux
-if [ "$IS_TERMUX" = true ] && [ command -v termux-setup-storage >/dev/null 2>&1 ]; then
+if [ "$IS_TERMUX" = true ] && command -v termux-setup-storage >/dev/null 2>&1; then
     echo -e "       Configurando armazenamento do Termux..."
     termux-setup-storage 2>/dev/null || true
 fi
@@ -113,7 +113,12 @@ case "$1" in
             if command -v termux-wake-lock >/dev/null 2>&1; then
                 termux-wake-lock
             fi
-            nohup python "$AGENT_FILE" "$SERVER_URL" > "$LOG_FILE" 2>&1 &
+            PYTHON_BIN="$(command -v python || command -v python3 || true)"
+            if [ -z "$PYTHON_BIN" ]; then
+                echo "❌ Python não encontrado. Instale com: pkg install python"
+                exit 1
+            fi
+            nohup "$PYTHON_BIN" "$AGENT_FILE" "$SERVER_URL" > "$LOG_FILE" 2>&1 &
             echo $! > "$PID_FILE"
             echo "✅ Agente iniciado com sucesso! PID: $(cat $PID_FILE)"
         fi
@@ -140,6 +145,7 @@ case "$1" in
         fi
         ;;
     log|logs)
+        touch "$LOG_FILE"
         tail -n 50 -f "$LOG_FILE"
         ;;
     restart)
